@@ -1,0 +1,6 @@
+# pin as you go — starter set for the ReAct loop + embedding comparison
+openai
+anthropic
+sentence-transformers
+numpy
+pytest
