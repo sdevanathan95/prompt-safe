@@ -1,0 +1,45 @@
+"""Shared data structures for the MELON causal test (Track B)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    name: str
+    arguments: dict
+
+
+@dataclass
+class ActionPair:
+    original_calls: list[ToolCall]
+    masked_calls: list[ToolCall]
+    placeholder_task: str
+
+
+@dataclass
+class MelonVerdict:
+    ran: bool
+    verdict: Literal["safe", "block"] | None
+    distance: float | None
+    original_calls: list[ToolCall] = field(default_factory=list)
+    masked_calls: list[ToolCall] = field(default_factory=list)
+    placeholder_task: str | None = None
+    explanation: str = ""
+
+    def to_trace_dict(self) -> dict:
+        """Shape matching middleware/trace/schema.md's melon_check field."""
+        return {
+            "ran": self.ran,
+            "placeholder_task": self.placeholder_task,
+            "original_calls": [
+                {"name": c.name, "arguments": c.arguments} for c in self.original_calls
+            ],
+            "masked_calls": [
+                {"name": c.name, "arguments": c.arguments} for c in self.masked_calls
+            ],
+            "distance": self.distance,
+            "verdict": self.verdict,
+        }

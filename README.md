@@ -1,37 +1,61 @@
 # Causal, explainable security middleware for tool-calling agents
 
-Pluggable middleware that catches indirect prompt injection by testing whether
-an agent's action was actually *caused by* the user's request, instead of
-classifying tool output text as suspicious.
+Pluggable middleware that catches indirect prompt injection by testing
+whether an agent's action was actually *caused by* the user's request,
+instead of classifying tool output text as suspicious.
 
-Full project brief (research grounding, architecture rationale, evaluation
-plan): see `docs/project-brief.md`.
+Full research grounding and architecture rationale: see
+`docs/project-brief.md`.
+
+## How it works
+
+An agent's next tool call is checked in stages, each one only running when
+the stage before it couldn't resolve the decision:
+
+1. **Screening** — tool output is tagged trusted/untrusted by region. A
+   judge model flags which regions actually matter for the current
+   decision; irrelevant regions are masked out before the main agent acts
+   on them.
+2. **Policy check** — a three-way verdict: clearly safe (auto-execute),
+   clearly a violation (block), or genuinely ambiguous (escalate).
+3. **Counterfactual test** — for ambiguous cases, the agent's step is
+   re-run with the user's real task swapped for a neutral placeholder,
+   same tool output kept in context. If the real run and the placeholder
+   run converge on the same tool call, the action wasn't driven by the
+   user's task at all — it was driven by the tool output. That's the
+   injection signal. Divergence means the action was genuinely
+   task-driven.
+4. **Human confirmation** — the rare last resort, only reached if the
+   counterfactual test itself is inconclusive.
+5. **Trace logging** — every step records what was screened, what was
+   masked, and (for any step that reached the counterfactual test) the
+   original-vs-masked comparison that produced the verdict. This is what
+   makes a block explainable instead of a bare refusal.
 
 ## Repo structure
 
 ```
 middleware/
-  screening/   Track A — RTBAS-style provenance tagging, LM-Judge screener,
-               3-way policy check (safe / block / escalate)
-  melon/       Track B — masked re-execution engine, tool-call comparison,
-               embedding threshold logic
-  trace/       Shared — trace/state schema, logging, the artifact the
+  screening/   Provenance tagging, judge-based region screener,
+               three-way policy check
+  melon/       Counterfactual masking engine: masked re-execution,
+               tool-call comparison, embedding threshold logic
+  trace/       Trace/state schema, logging — the artifact any
                visualizer reads
 adapters/      Provider adapters (OpenAI, Anthropic) + framework adapter
-               (LangGraph) — built in Week 3, shared
-eval/         Track B — AgentDojo / InjecAgent harness, metrics reporting
-demo/         Shared — live demo scenario, trace visualizer
-docs/         Project brief and any design notes
+               (LangGraph)
+eval/          Benchmark harness (AgentDojo / InjecAgent), metrics
+               reporting, hand-crafted test scenarios
+demo/          Live demo scenario, trace visualizer
+docs/          Project brief and design notes
 ```
 
-## The one shared contract
+## The shared trace contract
 
-Both tracks read/write the same trace object defined in
-`middleware/trace/schema.md`. Agree on this before splitting off — it's the
-only thing that has to be right for the two tracks to integrate cleanly in
-Week 2.
+Every stage reads/writes the same trace object, defined in
+`middleware/trace/schema.md`:
 
-```
+```json
 {
   "step": int,
   "source_provenance": "trusted" | "untrusted",
@@ -48,13 +72,16 @@ Week 2.
 }
 ```
 
-## Ownership
+## Setup
 
-| Track | Owns | Weeks |
-|---|---|---|
-| A | `middleware/screening/`, `middleware/trace/` | 1, then integration in 2–3 |
-| B | `middleware/melon/`, `eval/` | 1–2, then integration in 2–3 |
-| Shared | `adapters/`, `demo/` | 3 |
+```
+uv venv --python 3.12
+uv pip install -r requirements.txt
+```
 
-See `docs/task-split.md` for the week-by-week breakdown and integration
-checkpoints.
+## Tests
+
+```
+source .venv/bin/activate
+python -m pytest tests/ -v
+```
