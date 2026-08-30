@@ -1,6 +1,7 @@
 # pin as you go — starter set for the ReAct loop + embedding comparison
-openai
-anthropic
-sentence-transformers
-numpy
-pytest
+openai==3.3.1
+anthropic==1.0.0
+sentence-transformers==6.0.0
+numpy==2.5.2
+pytest==9.1.1
+agentdojo==0.1.35
