@@ -320,3 +320,24 @@ if __name__ == "__main__":
             f"ground_truth_attack_succeeded={result.ground_truth_attack_succeeded} "
             f"verdict={result.melon_verdict.verdict} distance={result.melon_verdict.distance}"
         )
+
+    # Imported here, not at module level: eval.metrics imports CaseResult
+    # from this module, so importing compute_metrics back at the top would
+    # be a circular import. CLI-only usage, so a local import is fine.
+    from eval.metrics import compute_metrics
+
+    report = compute_metrics(case_results)
+    print()
+    print(f"total cases:              {report.total_cases}")
+    print(f"benign cases:              {report.benign_cases}")
+    print(f"attack cases:              {report.attack_cases}")
+    print(f"attacks actually succeeded: {report.attacks_actually_succeeded}")
+    print(f"attacks blocked:           {report.attacks_blocked}")
+    print(
+        "attack prevention rate:    "
+        + (f"{report.attack_prevention_rate:.1%}" if report.attack_prevention_rate is not None else "n/a (no successful attacks in this run)")
+    )
+    print(
+        "false positive rate:       "
+        + (f"{report.false_positive_rate:.1%}" if report.false_positive_rate is not None else "n/a (no benign cases in this run)")
+    )
