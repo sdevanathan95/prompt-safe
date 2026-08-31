@@ -8,22 +8,52 @@ compare only the tool call itself (name + arguments), never response text.
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 
 import numpy as np
 
-from middleware.melon.cache import align, canonical_key
+from middleware.melon.cache import align
 from middleware.melon.types import MelonVerdict, ToolCall
 
-# Placeholder — needs real tuning against benchmark data (see plan §7).
-# Not a final value.
-DEFAULT_THRESHOLD = 0.15
+# Cosine distance threshold for "converged" — the reference implementation
+# (github.com/kaijiezhu11/MELON, pi_detector.py) flags injection at cosine
+# similarity > 0.8, i.e. distance < 0.2. We use <= 0.2 as the equivalent.
+DEFAULT_THRESHOLD = 0.2
 
 # Cosine distance assigned to an original call with no content-matching
 # counterpart in the masked run — the strongest possible divergence signal.
 NO_MATCH_DISTANCE = 1.0
 
 _EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+# For a call to one of these functions, these argument fields identify
+# *who/how much* the action actually affects. They're compared exactly,
+# not embedded — checked empirically (see cache.py's docstring for the
+# related alignment finding): a small local embedding model doesn't
+# discriminate two different short email addresses reliably enough to
+# trust a distance threshold on them, and fuzzing them at all is the
+# wrong idea regardless of model quality — we already isolated these
+# fields specifically because they're the precise, structured part of the
+# call. Embedding fuzziness belongs to genuine free text (e.g. an email
+# body), where we have no structured handle on what "close enough" means.
+SENSITIVE_ARG_FIELDS: dict[str, tuple[str, ...]] = {
+    "send_email": ("to", "recipients"),
+    "send_money": ("recipient", "amount"),
+    "transfer_money": ("recipient", "amount"),
+}
+
+
+def _identifying_fields(call: ToolCall) -> dict | None:
+    fields = SENSITIVE_ARG_FIELDS.get(call.name)
+    if not fields:
+        return None
+    selected = {k: call.arguments[k] for k in fields if k in call.arguments}
+    return selected or None
+
+
+def _embedding_text(call: ToolCall) -> str:
+    return json.dumps({"name": call.name, "arguments": call.arguments}, sort_keys=True)
 
 
 @lru_cache(maxsize=1)
@@ -35,11 +65,23 @@ def _get_model():
 
 def embed_call(call: ToolCall) -> np.ndarray:
     model = _get_model()
-    return model.encode(canonical_key(call), normalize_embeddings=True)
+    return model.encode(_embedding_text(call), normalize_embeddings=True)
 
 
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(1.0 - np.dot(a, b))
+
+
+def _pair_distance(original_call: ToolCall, masked_call: ToolCall | None) -> float:
+    if masked_call is None:
+        return NO_MATCH_DISTANCE
+
+    original_id = _identifying_fields(original_call)
+    masked_id = _identifying_fields(masked_call)
+    if original_id is not None and masked_id is not None:
+        return 0.0 if original_id == masked_id else NO_MATCH_DISTANCE
+
+    return cosine_distance(embed_call(original_call), embed_call(masked_call))
 
 
 def compare(
@@ -58,10 +100,7 @@ def compare(
         )
 
     aligned = align(original_calls, masked_calls)
-    distances = [
-        NO_MATCH_DISTANCE if masked_call is None else cosine_distance(embed_call(original_call), embed_call(masked_call))
-        for original_call, masked_call in aligned
-    ]
+    distances = [_pair_distance(original_call, masked_call) for original_call, masked_call in aligned]
     # Worst-case (max) distance across the step's calls: any strongly
     # divergent call is evidence the real task drove the action, so we
     # only call it convergence if every call matched closely.
