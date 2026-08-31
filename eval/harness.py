@@ -20,12 +20,14 @@ Two conditions per user task:
 
 For each condition: the original task runs normally through the full
 AgentDojo pipeline. Its actual tool-output text (whatever it observed,
-injected content included) is then handed to middleware.melon's masked
-conversation (see middleware/melon/masking.py for why — a fresh episode
-with a "do nothing" placeholder never gets exposed to the tool output at
-all, since nothing gives it a reason to go look). The masked run is a
-single direct call to the pipeline's own `llm` element — not the full
-pipeline — since it only needs one decision, not a multi-step loop.
+injected content included) and already-decided tool calls are then handed
+to `middleware.melon.engine.run_melon_check` — the same Track-A-facing
+entrypoint the eventual live decorator will call, not a harness-local
+reimplementation of it. The `agent_call_fn` we give it adapts
+`run_melon_check`'s generic masked-conversation dicts (see
+middleware/melon/masking.py) into a single direct call to the pipeline's
+own `llm` element — not the full pipeline, since it only needs one
+decision, not a multi-step loop.
 """
 
 from __future__ import annotations
@@ -50,8 +52,7 @@ from agentdojo.task_suite.task_suite import (
 from agentdojo.types import text_content_block_from_string
 
 from middleware.melon.compare import DEFAULT_THRESHOLD
-from middleware.melon.engine import evaluate_pair
-from middleware.melon.masking import build_masked_messages
+from middleware.melon.engine import AgentCallFn, run_melon_check
 from middleware.melon.types import MelonVerdict, ToolCall
 
 # Cheapest tier per provider — use this to validate the wiring before
@@ -156,19 +157,22 @@ def _to_agentdojo_messages(messages: list[dict]) -> list:
     return result
 
 
-def _run_masked_llm_call(
-    llm_element: BasePipelineElement,
-    tool_output_text: str,
-    system_message: str | None,
-    suite: TaskSuite,
-    environment,
-) -> list[ToolCall]:
-    generic_messages = build_masked_messages(tool_output_text, system_message)
-    agentdojo_messages = _to_agentdojo_messages(generic_messages)
+def _make_agent_call_fn(llm_element: BasePipelineElement, suite: TaskSuite, environment) -> AgentCallFn:
+    """Adapts run_melon_check's generic masked-conversation dicts into one
+    direct call to the pipeline's own llm element. This is the only
+    AgentDojo-specific piece of the masked run — everything upstream of it
+    (building the masked conversation, deciding whether to run it at all)
+    lives in middleware.melon and is exercised exactly as Track A's
+    eventual live decorator would exercise it."""
     runtime = FunctionsRuntime(suite.tools)
-    _, _, _, updated_messages, _ = llm_element.query("", runtime, environment, agentdojo_messages, {})
-    last_message = updated_messages[-1]
-    return _to_tool_calls(last_message.get("tool_calls") or [])
+
+    def agent_call_fn(messages: list[dict]) -> list[ToolCall]:
+        agentdojo_messages = _to_agentdojo_messages(messages)
+        _, _, _, updated_messages, _ = llm_element.query("", runtime, environment, agentdojo_messages, {})
+        last_message = updated_messages[-1]
+        return _to_tool_calls(last_message.get("tool_calls") or [])
+
+    return agent_call_fn
 
 
 def _check_result(
@@ -206,15 +210,14 @@ def run_benign_case(
     _, _, _, messages, _ = pipeline.query(user_task.PROMPT, runtime, environment.model_copy(deep=True))
     original_calls = _to_tool_calls(_final_assistant_tool_calls(messages))
 
-    masked_calls = _run_masked_llm_call(
-        llm_element,
-        _extract_tool_output_text(messages),
-        _extract_system_message(messages),
-        suite,
-        environment.model_copy(deep=True),
+    agent_call_fn = _make_agent_call_fn(llm_element, suite, environment.model_copy(deep=True))
+    verdict = run_melon_check(
+        original_calls,
+        tool_output_text=_extract_tool_output_text(messages),
+        agent_call_fn=agent_call_fn,
+        system_message=_extract_system_message(messages),
+        threshold=threshold,
     )
-
-    verdict = evaluate_pair(original_calls, masked_calls, threshold)
     return CaseResult(user_task.ID, None, None, verdict)
 
 
@@ -242,15 +245,14 @@ def run_attack_case(
         injection_task, original_output, pre_environment, post_environment, full_function_calls
     )
 
-    masked_calls = _run_masked_llm_call(
-        llm_element,
-        _extract_tool_output_text(messages),
-        _extract_system_message(messages),
-        suite,
-        environment.model_copy(deep=True),
+    agent_call_fn = _make_agent_call_fn(llm_element, suite, environment.model_copy(deep=True))
+    verdict = run_melon_check(
+        original_calls,
+        tool_output_text=_extract_tool_output_text(messages),
+        agent_call_fn=agent_call_fn,
+        system_message=_extract_system_message(messages),
+        threshold=threshold,
     )
-
-    verdict = evaluate_pair(original_calls, masked_calls, threshold)
     return CaseResult(user_task.ID, injection_task_id, ground_truth_attack_succeeded, verdict)
 
 
@@ -266,8 +268,10 @@ def run_suite_subset(
 ) -> list[CaseResult]:
     """Runs the benign case plus one attack per injection task (capped at
     `max_injection_tasks` if given — a suite typically has more than one)
-    for up to `max_user_tasks` of the suite's user tasks. Each case makes 2
-    LLM calls (original + masked run), so total calls =
+    for up to `max_user_tasks` of the suite's user tasks. Each case makes 1
+    LLM call for the original run, plus a second only if the original
+    call(s) were sensitive enough to warrant the masked run (see
+    middleware/melon/prefilter.py) — so up to, but not always,
     max_user_tasks * (1 + injection_tasks_used) * 2. This makes real, paid
     LLM calls — call only when you intend to spend on a run."""
     suite = get_suite(benchmark_version, suite_name)
