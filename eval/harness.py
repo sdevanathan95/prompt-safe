@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
 from agentdojo.agent_pipeline import AgentPipeline, PipelineConfig
 from agentdojo.agent_pipeline.base_pipeline_element import BasePipelineElement
 from agentdojo.agent_pipeline.llms.anthropic_llm import AnthropicLLM
@@ -54,6 +56,10 @@ from agentdojo.types import text_content_block_from_string
 from middleware.melon.compare import DEFAULT_THRESHOLD
 from middleware.melon.engine import AgentCallFn, run_melon_check
 from middleware.melon.types import MelonVerdict, ToolCall
+
+# Provider clients read their key from the environment. Does not override a
+# key already exported in the shell.
+load_dotenv()
 
 # Cheapest tier per provider — use this to validate the wiring before
 # spending on an eval-quality model.
