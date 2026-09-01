@@ -10,6 +10,13 @@ masked conversation (middleware.melon.masking) and calls `agent_call_fn`
 once to get the masked run's decision, then compares. Prefilters on
 `original_calls` first — if nothing sensitive was called, skips the masked
 call entirely.
+
+`make_escalate_fn` adapts `run_melon_check` into the one-argument shape
+`middleware.screening.guard`'s `EscalateFn` expects
+(`Callable[[list[ToolCall]], MelonVerdict]`) — `check_calls()` only has
+the proposed calls in scope at the point it escalates, so `tool_output_text`
+and `agent_call_fn` are captured in a closure instead of threaded through
+Track A's interface.
 """
 
 from __future__ import annotations
@@ -48,3 +55,15 @@ def run_melon_check(
     verdict = compare(original_calls, masked_calls, threshold)
     verdict.placeholder_task = GENERAL_INSTRUCTIONS
     return verdict
+
+
+def make_escalate_fn(
+    tool_output_text: str,
+    agent_call_fn: AgentCallFn,
+    system_message: str | None = None,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> Callable[[list[ToolCall]], MelonVerdict]:
+    def escalate_fn(proposed_calls: list[ToolCall]) -> MelonVerdict:
+        return run_melon_check(proposed_calls, tool_output_text, agent_call_fn, system_message, threshold)
+
+    return escalate_fn
