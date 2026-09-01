@@ -78,10 +78,12 @@ def check_calls(
     screened: ScreenedStep,
     proposed_calls: list[ToolCall],
     escalate_fn: EscalateFn | None = None,
+    enforce_confidentiality: bool = policy.ENFORCE_CONFIDENTIALITY_BY_DEFAULT,
 ) -> StepResult:
     """Stage 2, escalating to Stage 3 only for the ambiguous bucket."""
     decisions = [
-        policy.check(call.name, screened.label) for call in proposed_calls
+        policy.check(call.name, screened.label, enforce_confidentiality)
+        for call in proposed_calls
     ]
     verdict = _worst_verdict(decisions)
     driving = _driving_decision(decisions, verdict)

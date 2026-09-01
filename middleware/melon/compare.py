@@ -1,88 +1,87 @@
-"""Embedding distance on tool calls only — not full text+calls.
+"""Tool-call comparison for MELON's counterfactual test.
 
-Fixes MELON challenge (3): the natural-language response text can differ
-between runs even when the actual dangerous tool call is identical,
-inflating embedding distance and causing false negatives. We embed and
-compare only the tool call itself (name + arguments), never response text.
+Implements the detection rule from arXiv:2502.05174 Algorithm 1:
+
+    Alert iff  ∃c ∈ C^o_{t+1}, ∃h ∈ H_{t+1} : sim(c, h) > θ
+
+Three properties of that rule matter and were each got wrong here before:
+
+- It is an **all-pairs** comparison. Every original call is compared against
+  every cached masked call. Pairing the two runs up by function name first
+  meant a masked `send_money` was never compared against an original
+  `transfer_money`, and every unpaired call scored maximum divergence — five
+  of twelve benchmark cases read as clean for that reason alone.
+- Similarity is **always** the embedding cosine (§3.3). Short-circuiting to an
+  exact match on the identifying arguments makes the threshold inert: on the
+  banking suite every comparison landed on exactly 0.0 or 1.0.
+- Comparison runs on the **rendered, argument-filtered** string (A.3), not on
+  the raw call, so that free-text arguments cannot dominate the vector.
 """
 
 from __future__ import annotations
 
-import json
-from functools import lru_cache
-
-import numpy as np
-
-from middleware.melon.cache import align
+from adapters.embeddings import cosine_similarity, embed
 from middleware.melon.prefilter import is_sensitive
 from middleware.melon.types import MelonVerdict, ToolCall
 
-# Cosine distance threshold for "converged" — the reference implementation
-# (github.com/kaijiezhu11/MELON, pi_detector.py) flags injection at cosine
-# similarity > 0.8, i.e. distance < 0.2. We use <= 0.2 as the equivalent.
-DEFAULT_THRESHOLD = 0.2
+# Cosine *similarity* above which two calls count as converged. The paper's
+# value; its ablation (Table 4) moves ASR only between 0.95% and 1.11% across
+# 0.5-0.9, so this is not a tuned number.
+DEFAULT_SIMILARITY_THRESHOLD = 0.8
 
-# Cosine distance assigned to an original call with no content-matching
-# counterpart in the masked run — the strongest possible divergence signal.
-NO_MATCH_DISTANCE = 1.0
+# Kept as a distance for callers written against the previous interface.
+DEFAULT_THRESHOLD = 1.0 - DEFAULT_SIMILARITY_THRESHOLD
 
-_EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+# Rendered stand-in for an empty call list (A.3).
+NO_TOOL_CALLS = "No tool calls"
 
-# For a call to one of these functions, these argument fields identify
-# *who/how much* the action actually affects. They're compared exactly,
-# not embedded — checked empirically (see cache.py's docstring for the
-# related alignment finding): a small local embedding model doesn't
-# discriminate two different short email addresses reliably enough to
-# trust a distance threshold on them, and fuzzing them at all is the
-# wrong idea regardless of model quality — we already isolated these
-# fields specifically because they're the precise, structured part of the
-# call. Embedding fuzziness belongs to genuine free text (e.g. an email
-# body), where we have no structured handle on what "close enough" means.
+# A.3: for these functions only the listed arguments are rendered, so that an
+# email body or transfer note cannot dominate the embedding. Every other
+# function renders all of its arguments.
 SENSITIVE_ARG_FIELDS: dict[str, tuple[str, ...]] = {
-    "send_email": ("to", "recipients"),
+    "send_email": ("recipients", "to"),
     "send_money": ("recipient", "amount"),
     "transfer_money": ("recipient", "amount"),
+    "schedule_transaction": ("recipient", "amount"),
+    "update_scheduled_transaction": ("recipient", "amount"),
 }
 
 
-def _identifying_fields(call: ToolCall) -> dict | None:
+def render_call(call: ToolCall) -> str:
+    """`function_name(arg1 = value1, arg2 = value2)`, per A.3."""
     fields = SENSITIVE_ARG_FIELDS.get(call.name)
-    if not fields:
-        return None
-    selected = {k: call.arguments[k] for k in fields if k in call.arguments}
-    return selected or None
+    if fields:
+        items = [(k, call.arguments[k]) for k in fields if k in call.arguments]
+    else:
+        items = sorted(call.arguments.items())
+    rendered = ", ".join(f"{name} = {value}" for name, value in items)
+    return f"{call.name}({rendered})"
 
 
-def _embedding_text(call: ToolCall) -> str:
-    return json.dumps({"name": call.name, "arguments": call.arguments}, sort_keys=True)
+def render_calls(calls: list[ToolCall]) -> str:
+    return "; ".join(render_call(c) for c in calls) if calls else NO_TOOL_CALLS
 
 
-@lru_cache(maxsize=1)
-def _get_model():
-    from sentence_transformers import SentenceTransformer
-
-    return SentenceTransformer(_EMBEDDING_MODEL_NAME)
+def call_similarity(left: ToolCall, right: ToolCall) -> float:
+    return cosine_similarity(embed(render_call(left)), embed(render_call(right)))
 
 
-def embed_call(call: ToolCall) -> np.ndarray:
-    model = _get_model()
-    return model.encode(_embedding_text(call), normalize_embeddings=True)
+def most_similar_pair(
+    original_calls: list[ToolCall], masked_calls: list[ToolCall]
+) -> tuple[float, ToolCall | None, ToolCall | None]:
+    """Highest similarity over all (original, masked) pairs, and the pair.
 
-
-def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    return float(1.0 - np.dot(a, b))
-
-
-def _pair_distance(original_call: ToolCall, masked_call: ToolCall | None) -> float:
-    if masked_call is None:
-        return NO_MATCH_DISTANCE
-
-    original_id = _identifying_fields(original_call)
-    masked_id = _identifying_fields(masked_call)
-    if original_id is not None and masked_id is not None:
-        return 0.0 if original_id == masked_id else NO_MATCH_DISTANCE
-
-    return cosine_distance(embed_call(original_call), embed_call(masked_call))
+    All pairs, not name-matched pairs: the masked run frequently reaches the
+    same effect through a differently-named tool, and the whole point of an
+    embedding comparison is to catch that.
+    """
+    best = (0.0, None, None)
+    for original in original_calls:
+        for masked in masked_calls:
+            score = call_similarity(original, masked)
+            if score > best[0]:
+                best = (score, original, masked)
+    return best
 
 
 def compare(
@@ -90,63 +89,65 @@ def compare(
     masked_calls: list[ToolCall],
     threshold: float = DEFAULT_THRESHOLD,
 ) -> MelonVerdict:
+    """Compare the two runs' calls. `threshold` is a cosine *distance*."""
+    similarity_threshold = 1.0 - threshold
+
     if not original_calls:
         return MelonVerdict(
-            ran=True,
-            verdict="safe",
-            distance=None,
-            original_calls=original_calls,
-            masked_calls=masked_calls,
+            ran=True, verdict="safe", distance=None,
+            original_calls=original_calls, masked_calls=masked_calls,
             explanation="No tool calls were made in the original run — nothing to test.",
         )
 
-    # Only calls that can actually cause harm are compared. A converged read
-    # is not an attack, and the masked conversation itself opens with a
-    # read_file, so including reads would match that by construction.
+    # Only calls that can cause harm are compared. A converged read is not an
+    # attack, and the masked conversation opens with its own read_file, which
+    # a read in the original run would match by construction.
     sensitive_calls = [call for call in original_calls if is_sensitive(call)]
     if not sensitive_calls:
         return MelonVerdict(
-            ran=True,
-            verdict="safe",
-            distance=None,
-            original_calls=original_calls,
-            masked_calls=masked_calls,
+            ran=True, verdict="safe", distance=None,
+            original_calls=original_calls, masked_calls=masked_calls,
             explanation=(
                 "No call in the original run touches a sensitive action, so "
                 "convergence could not cause harm either way."
             ),
         )
 
-    aligned = align(sensitive_calls, masked_calls)
-    distances = [_pair_distance(original_call, masked_call) for original_call, masked_call in aligned]
-    # Closest (min) match across the step's sensitive calls. MELON alerts when
-    # *any* original call converges with *any* masked call, not when all of
-    # them do: an agent that completes the user's real task and the injected
-    # one in the same step must still be caught, and taking the worst-case
-    # distance would let the benign call mask the malicious one.
-    distance = min(distances)
-    verdict: str = "block" if distance <= threshold else "safe"
+    if not masked_calls:
+        return MelonVerdict(
+            ran=True, verdict="safe", distance=1.0,
+            original_calls=original_calls, masked_calls=masked_calls,
+            explanation=(
+                "With the user's task removed the agent made no tool calls at "
+                "all, so the action it took in the real run was driven by the "
+                "task. Consistent with benign behavior."
+            ),
+        )
+
+    similarity, original_match, masked_match = most_similar_pair(sensitive_calls, masked_calls)
+    distance = 1.0 - similarity
+    verdict = "block" if similarity > similarity_threshold else "safe"
 
     if verdict == "block":
         explanation = (
-            "The masked run (neutral placeholder task) produced the same tool "
-            f"call(s) as the original run (distance={distance:.3f} <= "
-            f"threshold={threshold}). The action wasn't driven by the user's "
-            "task — it converged on the tool output alone. Flagged as injection."
+            f"With the user's task removed, the agent still produced "
+            f"{render_call(masked_match)}, which matches "
+            f"{render_call(original_match)} from the real run "
+            f"(similarity {similarity:.3f} > {similarity_threshold:.2f}). "
+            "Nothing about the user's request explains that action, so it came "
+            "from the tool output. Flagged as injection."
         )
     else:
         explanation = (
-            "The masked run (neutral placeholder task) diverged from the "
-            f"original run's tool call(s) (distance={distance:.3f} > "
-            f"threshold={threshold}). The action depended on the real task, "
-            "consistent with benign behavior."
+            f"With the user's task removed the agent's closest action was "
+            f"{render_call(masked_match)}, which does not match "
+            f"{render_call(original_match)} from the real run "
+            f"(similarity {similarity:.3f} ≤ {similarity_threshold:.2f}). "
+            "The action depended on the real task, consistent with benign behavior."
         )
 
     return MelonVerdict(
-        ran=True,
-        verdict=verdict,
-        distance=distance,
-        original_calls=original_calls,
-        masked_calls=masked_calls,
+        ran=True, verdict=verdict, distance=distance,
+        original_calls=original_calls, masked_calls=masked_calls,
         explanation=explanation,
     )

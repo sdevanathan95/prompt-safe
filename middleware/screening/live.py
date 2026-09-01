@@ -73,6 +73,11 @@ class Session:
     # carries the same label, so redaction can only mask a whole tool
     # response at a time and never one poisoned message inside an inbox.
     trusted_authors: frozenset[str] = frozenset()
+    # Also block private data reaching an outward channel, not just
+    # untrusted data reaching a sensitive action. Off by default: it is a
+    # leak policy, and enforcing it against integrity-only labels turns
+    # every legitimate outbound email into a violation.
+    enforce_confidentiality: bool = False
 
     def __post_init__(self) -> None:
         self._tool_outputs: list[tuple[str, str]] = []
@@ -132,7 +137,10 @@ class Session:
                     system_message=self.system_message,
                 )
 
-            result = check_calls(self._step, screened, [call], escalate_fn=escalate_fn)
+            result = check_calls(
+                self._step, screened, [call], escalate_fn=escalate_fn,
+                enforce_confidentiality=self.enforce_confidentiality,
+            )
             trace = result.trace
             if self.logger is not None:
                 self.logger.log(trace)

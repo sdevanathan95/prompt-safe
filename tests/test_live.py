@@ -47,7 +47,7 @@ def test_a_blocked_call_never_runs_its_body():
     """The property that makes this "live" rather than diagnostic: the real
     function is never invoked, not invoked-then-undone."""
     executed = []
-    session = Session("email my balance", judge_fn=judge_returning("REGION_1"))
+    session = Session("email my balance", judge_fn=judge_returning("REGION_1"), enforce_confidentiality=True)
     session.observe("get_balance", "Balance: $412.19")
 
     @session.protect
@@ -156,7 +156,7 @@ def test_logger_receives_every_step_including_blocked_ones(tmp_path):
 
     session = Session(
         "email my balance", judge_fn=judge_returning("REGION_1"),
-        logger=TraceLogger(tmp_path / "run.jsonl"),
+        logger=TraceLogger(tmp_path / "run.jsonl"), enforce_confidentiality=True,
     )
     session.observe("get_balance", "Balance: $412.19")
 

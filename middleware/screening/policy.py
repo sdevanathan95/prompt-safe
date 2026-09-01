@@ -35,28 +35,36 @@ from middleware.screening.labels import (
 
 Verdict = Literal["safe", "block", "escalate"]
 
-# Tools that push data out of the user's trust boundary. They must be reached
-# from a trusted context AND must not carry private data outward, so both axes
-# are pinned to the permissive end.
+# Tools that push data out of the user's trust boundary. Integrity-sensitive
+# in every configuration; whether their *confidentiality* is also constrained
+# depends on enforce_confidentiality (see check()).
 EXFILTRATION_SINKS = (
     "send_email",
     "send_message",
+    "send_direct_message",
+    "send_channel_message",
     "post",
     "publish",
     "share",
-    "send_channel_message",
     "add_user_to_channel",
     "invite_user_to_slack",
+    "add_new_user",
 )
 
 # Tools with significant, hard-to-reverse side effects that do not themselves
 # republish data. Integrity must be trusted; confidentiality is unconstrained
-# because nothing leaves.
+# because nothing leaves. Names follow RTBAS's own AgentDojo labeling
+# (arXiv:2502.08966 Table 1): send_money and update_transactions for banking,
+# book_hotel for travel, update_calendar for workspace.
 SIDE_EFFECT_SINKS = (
     "send_money",
     "transfer_money",
     "schedule_transaction",
     "update_scheduled_transaction",
+    "update_transaction",
+    "update_calendar",
+    "update_password",
+    "update_user_info",
     "pay",
     "purchase",
     "book",
@@ -72,11 +80,24 @@ SIDE_EFFECT_SINKS = (
 UNCONSTRAINED = TOP
 
 
-def policy_label(tool_name: str) -> Label:
+# RTBAS evaluates prompt injection (integrity) and accidental leakage
+# (confidentiality) as two separate benchmarks with two separate labelings —
+# its AgentDojo table lists integrity-sensitive tools only. Enforcing both
+# axes at once against integrity-only data is not a stricter version of the
+# paper, it is a different policy: every task that legitimately emails
+# something the user owns becomes a violation. Confidentiality is therefore
+# opt-in, and off by default.
+ENFORCE_CONFIDENTIALITY_BY_DEFAULT = False
+
+
+def policy_label(tool_name: str, enforce_confidentiality: bool = ENFORCE_CONFIDENTIALITY_BY_DEFAULT) -> Label:
     """P: the most restrictive context this call may be made from."""
     name = tool_name.lower()
     if any(keyword in name for keyword in EXFILTRATION_SINKS):
-        return Label(Integrity.TRUSTED, Confidentiality.PUBLIC)
+        return Label(
+            Integrity.TRUSTED,
+            Confidentiality.PUBLIC if enforce_confidentiality else Confidentiality.PRIVATE,
+        )
     if any(keyword in name for keyword in SIDE_EFFECT_SINKS):
         return Label(Integrity.TRUSTED, Confidentiality.PRIVATE)
     return UNCONSTRAINED
@@ -100,9 +121,13 @@ class PolicyDecision:
         }
 
 
-def check(tool_name: str, context_label: Label) -> PolicyDecision:
+def check(
+    tool_name: str,
+    context_label: Label,
+    enforce_confidentiality: bool = ENFORCE_CONFIDENTIALITY_BY_DEFAULT,
+) -> PolicyDecision:
     """Three-way policy check on one proposed tool call."""
-    allowed = policy_label(tool_name)
+    allowed = policy_label(tool_name, enforce_confidentiality)
 
     def decision(verdict: Verdict, explanation: str) -> PolicyDecision:
         return PolicyDecision(verdict, tool_name, context_label, allowed, explanation)

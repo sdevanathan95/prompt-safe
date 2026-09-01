@@ -39,7 +39,7 @@ def test_private_data_reaching_an_outward_channel_is_blocked():
     """Blocked rather than escalated: Stage 3 decides whether the user's task
     caused an action, which is not a question that makes a disclosure
     recoverable."""
-    decision = check("send_email", TRUSTED_PRIVATE)
+    decision = check("send_email", TRUSTED_PRIVATE, enforce_confidentiality=True)
 
     assert decision.verdict == "block"
     assert "cannot be undone" in decision.explanation
@@ -59,13 +59,13 @@ def test_private_data_may_still_reach_a_non_publishing_sink():
     a private context is not a leak. Collapsing the two sink kinds together
     would block this legitimate call."""
     assert check("send_money", TRUSTED_PRIVATE).verdict == "safe"
-    assert check("send_email", TRUSTED_PRIVATE).verdict == "block"
+    assert check("send_email", TRUSTED_PRIVATE, enforce_confidentiality=True).verdict == "block"
 
 
 def test_confidentiality_violation_wins_over_integrity_violation():
     """Both axes fail here. The step is blocked, not escalated — Stage 3 could
     only ever clear the integrity half."""
-    decision = check("send_email", TOP)
+    decision = check("send_email", TOP, enforce_confidentiality=True)
 
     assert decision.verdict == "block"
 
@@ -84,7 +84,7 @@ def test_decision_records_both_sides_of_the_comparison():
 def test_explanations_avoid_paper_jargon():
     """These render directly in the trace for someone who has not read RTBAS."""
     for decision in (
-        check("send_email", TRUSTED_PRIVATE),
+        check("send_email", TRUSTED_PRIVATE, enforce_confidentiality=True),
         check("send_money", UNTRUSTED_PUBLIC),
         check("read_email", TOP),
     ):
