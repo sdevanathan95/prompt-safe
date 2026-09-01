@@ -7,6 +7,8 @@ accounting the project's headline claim rests on.
 
 from __future__ import annotations
 
+import pytest
+
 from eval.harness import CaseResult
 from eval.metrics import compute_metrics
 from middleware.melon.types import MelonVerdict
@@ -134,3 +136,47 @@ def test_defended_utility_under_attack_is_tracked_separately():
 
     assert report.utility_under_attack == 1.0
     assert report.defended_utility_under_attack == 0.5
+
+
+def test_confirmation_reduction_is_measured_against_rtbas_own_fallback():
+    """RTBAS asks a person whenever the policy check cannot clear a call, so
+    its confirmation count is exactly the escalation count. The project's
+    whole claim is the gap between that and what we actually ask."""
+    results = [
+        case(policy="safe", action="execute"),
+        case(policy="escalate", action="block"),
+        case(policy="escalate", action="execute"),
+        case(policy="escalate", action="ask_user"),
+    ]
+    report = compute_metrics(results)
+
+    assert report.rtbas_baseline_confirmations == 3
+    assert report.human_confirmations == 1
+    assert report.confirmation_reduction == pytest.approx(2 / 3)
+
+
+def test_confirmation_reduction_is_none_when_nothing_escalated():
+    """No escalations means no baseline to reduce against — reporting 100%
+    there would claim credit for work never done."""
+    report = compute_metrics([case(policy="safe", action="execute")])
+    assert report.confirmation_reduction is None
+
+
+def test_latency_separates_the_always_on_stage_from_the_rare_one():
+    """The cost argument is that stage 3 is expensive but rare, so the average
+    turn costs far less than an escalated one. One blended number hides that."""
+    cheap = case(policy="safe", action="execute")
+    cheap.timings = {"screen_ms": 100.0, "policy_ms": 2.0, "melon_ms": 0.0, "total_ms": 102.0}
+    costly = case(policy="escalate", action="block")
+    costly.timings = {"screen_ms": 100.0, "policy_ms": 2.0, "melon_ms": 900.0, "total_ms": 1002.0}
+
+    report = compute_metrics([cheap, costly])
+
+    assert report.mean_screen_ms == 100.0
+    assert report.mean_melon_ms_when_escalated == 900.0
+    assert report.mean_total_ms == 552.0
+
+
+def test_missing_timings_are_absent_not_zero():
+    report = compute_metrics([case(policy="safe", action="execute")])
+    assert report.mean_screen_ms is None

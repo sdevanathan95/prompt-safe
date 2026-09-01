@@ -165,9 +165,24 @@ the earlier single-axis shape.
 ## Setup
 
 ```
-uv venv --python 3.12
-uv pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env      # then add your key
 ```
+
+`uv venv && uv pip install -r requirements.txt` works too if you have `uv`.
+
+The middleware needs a key for its own internal calls — the LM judge and the
+embedding model the counterfactual comparison thresholds on:
+
+```
+OPENAI_API_KEY=sk-...        # or ANTHROPIC_API_KEY for --provider anthropic
+```
+
+Without a key the embedding comparison silently falls back to a small local
+model, which is materially worse at separating similar-looking tool calls and
+is not the configuration any reported number should come from. Set
+`PROMPT_SAFE_EMBEDDINGS=local` to force it deliberately; the test suite does.
 
 ## Tests
 

@@ -94,6 +94,8 @@ class CaseResult:
     policy_verdict: str | None = None
     final_action: str | None = None
     trace: dict | None = None
+    # Per-stage wall clock for this case; see StageTimings.
+    timings: dict | None = None
 
 
 def build_pipeline(provider: str, model_id: str | None = None) -> tuple[BasePipelineElement, BasePipelineElement]:
@@ -292,6 +294,7 @@ def run_benign_case(
         policy_verdict=step.trace.policy_verdict,
         final_action=step.trace.final_action,
         trace=step.trace.to_dict(),
+        timings=step.timings.to_dict(),
     )
 
 
@@ -336,6 +339,7 @@ def run_attack_case(
         policy_verdict=step.trace.policy_verdict,
         final_action=step.trace.final_action,
         trace=step.trace.to_dict(),
+        timings=step.timings.to_dict(),
     )
 
 
@@ -470,4 +474,18 @@ if __name__ == "__main__":
     print(f"escalation rate:            {pct(report.escalation_rate)}")
     print(f"auto-resolution rate:       {pct(report.auto_resolution_rate, 'n/a (nothing escalated)')}")
     print(f"auto-resolution accuracy:   {pct(report.auto_resolution_accuracy, 'n/a (no ground truth)')}")
-    print(f"human confirmations left:   {report.human_confirmations}")
+    print()
+    print("--- headline: confirmations vs RTBAS alone ---")
+    print(f"RTBAS alone would ask:      {report.rtbas_baseline_confirmations}")
+    print(f"we ask:                     {report.human_confirmations}")
+    print(f"confirmation reduction:     {pct(report.confirmation_reduction, 'n/a (nothing escalated)')}")
+
+    def ms(value):
+        return f"{value:.0f} ms" if value is not None else "n/a"
+
+    print()
+    print("--- latency by stage (mean per step) ---")
+    print(f"stage 1 screen:             {ms(report.mean_screen_ms)}")
+    print(f"stage 2 policy:             {ms(report.mean_policy_ms)}")
+    print(f"stage 3 (escalated only):   {ms(report.mean_melon_ms_when_escalated)}")
+    print(f"total per step:             {ms(report.mean_total_ms)}")

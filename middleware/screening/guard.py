@@ -14,7 +14,8 @@ knowing when reading numbers produced that way.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Callable
 
 from middleware.melon.types import MelonVerdict, ToolCall
@@ -37,11 +38,39 @@ _SEVERITY = {"safe": 0, "escalate": 1, "block": 2}
 
 
 @dataclass
+class StageTimings:
+    """Wall-clock milliseconds per stage of one step.
+
+    The project's cost argument is that Stage 1 is cheap and always on while
+    Stage 3 is expensive and rare, so the average turn pays far less than the
+    worst one. That is a claim about a distribution, and it cannot be checked
+    without measuring the stages separately.
+    """
+
+    screen_ms: float = 0.0
+    policy_ms: float = 0.0
+    melon_ms: float = 0.0
+
+    @property
+    def total_ms(self) -> float:
+        return self.screen_ms + self.policy_ms + self.melon_ms
+
+    def to_dict(self) -> dict:
+        return {
+            "screen_ms": round(self.screen_ms, 2),
+            "policy_ms": round(self.policy_ms, 2),
+            "melon_ms": round(self.melon_ms, 2),
+            "total_ms": round(self.total_ms, 2),
+        }
+
+
+@dataclass
 class StepResult:
     trace: StepTrace
     redaction: RedactionResult
     decisions: list[policy.PolicyDecision]
     melon_verdict: MelonVerdict | None
+    timings: StageTimings = field(default_factory=StageTimings)
 
 
 @dataclass
@@ -50,6 +79,7 @@ class ScreenedStep:
     screen_result: ScreenResult
     redaction: RedactionResult
     task_description: str = ""
+    screen_ms: float = 0.0
 
     @property
     def label(self) -> Label:
@@ -64,15 +94,18 @@ def screen_step(
     trusted_authors: frozenset[str] = frozenset(),
 ) -> ScreenedStep:
     """Stage 1: tag, screen, redact. Call before the agent generates."""
+    started = time.perf_counter()
     regions = build_regions(
         tool_outputs, start_index=start_index, trusted_authors=trusted_authors
     )
     screen_result = screen(regions, task_description, judge_fn)
+    redaction = redact(regions, screen_result.label)
     return ScreenedStep(
         regions=regions,
         screen_result=screen_result,
-        redaction=redact(regions, screen_result.label),
+        redaction=redaction,
         task_description=task_description,
+        screen_ms=(time.perf_counter() - started) * 1000.0,
     )
 
 
@@ -89,6 +122,7 @@ def check_calls(
     # that turn depended on, even when this particular call's arguments all
     # came from the user; that is the bulk of the escalation volume, and each
     # escalation costs a second model call.
+    policy_started = time.perf_counter()
     call_labels = [
         call_label(call.arguments, screened.regions, screened.task_description, screened.label)
         for call in proposed_calls
@@ -99,6 +133,10 @@ def check_calls(
     ]
     verdict = _worst_verdict(decisions)
     driving = _driving_decision(decisions, verdict)
+    timings = StageTimings(
+        screen_ms=screened.screen_ms,
+        policy_ms=(time.perf_counter() - policy_started) * 1000.0,
+    )
 
     melon_verdict: MelonVerdict | None = None
     final_action: FinalAction
@@ -121,7 +159,9 @@ def check_calls(
             "available for this run, so it falls back to asking the user."
         )
     else:
+        melon_started = time.perf_counter()
         melon_verdict = escalate_fn(proposed_calls)
+        timings.melon_ms = (time.perf_counter() - melon_started) * 1000.0
         final_action, explanation = _resolve_escalation(melon_verdict, driving)
 
     driving_label = (
@@ -149,7 +189,7 @@ def check_calls(
             screened.label,
         )
 
-    return StepResult(trace, screened.redaction, decisions, melon_verdict)
+    return StepResult(trace, screened.redaction, decisions, melon_verdict, timings)
 
 
 def _worst_verdict(decisions: list[policy.PolicyDecision]) -> policy.Verdict:
