@@ -25,7 +25,11 @@ from typing import Callable
 
 from middleware.melon.cache import ToolCallCache
 from middleware.melon.compare import DEFAULT_THRESHOLD, compare
-from middleware.melon.masking import GENERAL_INSTRUCTIONS, build_masked_messages
+from middleware.melon.masking import (
+    GENERAL_INSTRUCTIONS,
+    MASKING_PROMPTS,
+    build_masked_messages,
+)
 from middleware.melon.prefilter import prefiltered_safe_verdict, should_run_melon_check
 from middleware.melon.types import MelonVerdict, ToolCall
 
@@ -47,6 +51,7 @@ def run_melon_check(
     system_message: str | None = None,
     threshold: float = DEFAULT_THRESHOLD,
     cache: ToolCallCache | None = None,
+    masking_prompts: tuple[str, ...] = ("summarize",),
 ) -> MelonVerdict:
     """One step of the counterfactual test.
 
@@ -59,8 +64,19 @@ def run_melon_check(
     if not should_run_melon_check(original_calls):
         return prefiltered_safe_verdict(original_calls)
 
-    masked_messages = build_masked_messages(tool_output_text, system_message)
-    masked_calls = agent_call_fn(masked_messages)
+    # One masked run per ensemble member. Their calls are pooled rather than
+    # voted on, which makes the decision "any detector converged" -- the
+    # aggregation that minimizes missed attacks. The paper's own averaging
+    # rule (section 3.4.1) trades some of that recall back for precision; with
+    # a measured false-positive rate of zero there is headroom to spend on the
+    # recall side instead, and missed attacks are the error that cannot be
+    # recovered after the fact.
+    masked_calls: list[ToolCall] = []
+    for name in masking_prompts:
+        masked_messages = build_masked_messages(
+            tool_output_text, system_message, MASKING_PROMPTS[name]
+        )
+        masked_calls.extend(agent_call_fn(masked_messages))
 
     if cache is not None:
         cache.add_all(masked_calls)
@@ -77,11 +93,12 @@ def make_escalate_fn(
     system_message: str | None = None,
     threshold: float = DEFAULT_THRESHOLD,
     cache: ToolCallCache | None = None,
+    masking_prompts: tuple[str, ...] = ("summarize",),
 ) -> Callable[[list[ToolCall]], MelonVerdict]:
     def escalate_fn(proposed_calls: list[ToolCall]) -> MelonVerdict:
         return run_melon_check(
             proposed_calls, tool_output_text, agent_call_fn, system_message,
-            threshold, cache,
+            threshold, cache, masking_prompts,
         )
 
     return escalate_fn

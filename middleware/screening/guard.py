@@ -22,7 +22,12 @@ from middleware.melon.types import MelonVerdict, ToolCall
 from middleware.screening import policy
 from middleware.screening.labels import Label
 from middleware.screening.redactor import RedactionResult, redact
-from middleware.screening.provenance import call_label, explain_call_label
+from middleware.screening.alignment import check_alignment
+from middleware.screening.provenance import (
+    call_label,
+    explain_call_label,
+    source_regions_for_call,
+)
 from middleware.screening.regions import Region, build_regions, labels_by_id
 from middleware.screening.screener import JudgeFn, ScreenResult, screen
 from middleware.trace.schema import FinalAction, ScreenedRegions, StepTrace
@@ -98,7 +103,7 @@ def screen_step(
     regions = build_regions(
         tool_outputs, start_index=start_index, trusted_authors=trusted_authors
     )
-    screen_result = screen(regions, task_description, judge_fn)
+    screen_result = _screen_if_it_can_change_anything(regions, task_description, judge_fn)
     redaction = redact(regions, screen_result.label)
     return ScreenedStep(
         regions=regions,
@@ -109,12 +114,49 @@ def screen_step(
     )
 
 
+def _screen_if_it_can_change_anything(
+    regions: list[Region],
+    task_description: str,
+    judge_fn: JudgeFn,
+) -> ScreenResult:
+    """Skip the judge call when its answer cannot affect the outcome.
+
+    The dependency label is the join of the relevant regions' labels. When
+    every region carries the same label, that join is that label for any
+    non-empty subset the judge could name, and the redactor keeps everything
+    because each region's label flows to it. The screener is then a paid model
+    call whose result is already determined.
+
+    This is not an approximation — it is the same answer, and it removes the
+    always-on cost from every step whose history is uniformly labeled, which
+    is most of them on suites where regions carry no author information.
+    """
+    if not regions:
+        return screen([], task_description, judge_fn)
+
+    distinct_labels = {region.label for region in regions}
+    if len(distinct_labels) == 1:
+        only = next(iter(distinct_labels))
+        return ScreenResult(
+            relevant_ids=[region.id for region in regions],
+            label=only,
+            reasoning=(
+                "Every region carries the same label, so which of them the "
+                "next decision depends on cannot change the outcome; the "
+                "screening model call was skipped."
+            ),
+        )
+
+    return screen(regions, task_description, judge_fn)
+
+
 def check_calls(
     step: int,
     screened: ScreenedStep,
     proposed_calls: list[ToolCall],
     escalate_fn: EscalateFn | None = None,
     enforce_confidentiality: bool = policy.ENFORCE_CONFIDENTIALITY_BY_DEFAULT,
+    alignment_judge_fn=None,
 ) -> StepResult:
     """Stage 2, escalating to Stage 3 only for the ambiguous bucket."""
     # Per-argument provenance rather than the step's joined label. The join
@@ -133,6 +175,25 @@ def check_calls(
     ]
     verdict = _worst_verdict(decisions)
     driving = _driving_decision(decisions, verdict)
+
+    # Stage 2.5: an escalation only means untrusted content reached a
+    # sensitive action, which is also what a user pointing the agent at a
+    # document looks like. Ask whether the call serves the request before
+    # paying for a masked re-execution. Can only downgrade, never permit
+    # something already blocked.
+    alignment = None
+    if verdict == "escalate" and alignment_judge_fn is not None and driving is not None:
+        driving_call = proposed_calls[decisions.index(driving)]
+        alignment = check_alignment(
+            screened.task_description,
+            driving_call.name,
+            driving_call.arguments,
+            source_regions_for_call(driving_call.arguments, screened.regions),
+            alignment_judge_fn,
+        )
+        if alignment.clears_escalation:
+            verdict = "safe"
+
     timings = StageTimings(
         screen_ms=screened.screen_ms,
         policy_ms=(time.perf_counter() - policy_started) * 1000.0,
@@ -144,9 +205,16 @@ def check_calls(
 
     if verdict == "safe":
         final_action = "execute"
-        explanation = driving.explanation if driving else (
-            "This step proposed no tool calls, so there was nothing to check."
-        )
+        if alignment is not None and alignment.clears_escalation:
+            explanation = (
+                "This step depends on content that came from outside, but the "
+                "user's own request pointed the agent at that content and this "
+                f"action is what it asks for. {alignment.reasoning}"
+            )
+        else:
+            explanation = driving.explanation if driving else (
+                "This step proposed no tool calls, so there was nothing to check."
+            )
     elif verdict == "block":
         final_action = "block"
         explanation = driving.explanation

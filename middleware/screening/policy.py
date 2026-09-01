@@ -74,10 +74,41 @@ SIDE_EFFECT_SINKS = (
     "cancel",
 )
 
-# Anything not named above is treated as a read: no constraint, since a read
-# cannot violate a policy on its own. Its *output* is what carries a label
-# forward, and that is regions.py's job.
+# Reads cannot violate a flow policy on their own — their *output* carries a
+# label forward, which is regions.py's job — so they are the only calls left
+# unconstrained. Matched as a prefix on the tool name.
+#
+# This list, not the sink lists, is what the policy enumerates. Enumerating
+# sinks instead is fail-open: a tool nobody thought to name is permitted by
+# default. That is not hypothetical here. Every attack this defense missed on
+# the workspace suite -- 7 of 8 misses overall -- was the same injection task
+# calling `create_calendar_event`, which matched no sink pattern and was
+# therefore waved through at Stage 2 without ever reaching the counterfactual
+# test. Deny-by-default costs escalations on unrecognized read-shaped tools;
+# fail-open costs missed attacks, and only one of those is recoverable.
+READ_ONLY_PREFIXES = (
+    "get_",
+    "read_",
+    "search_",
+    "list_",
+    "find_",
+    "query_",
+    "check_",
+    "view_",
+    "fetch_",
+    "retrieve_",
+    "lookup_",
+    "show_",
+    "describe_",
+    "count_",
+)
+
 UNCONSTRAINED = TOP
+
+
+def is_read_only(tool_name: str) -> bool:
+    name = tool_name.lower()
+    return any(name.startswith(prefix) for prefix in READ_ONLY_PREFIXES)
 
 
 # RTBAS evaluates prompt injection (integrity) and accidental leakage
@@ -98,9 +129,11 @@ def policy_label(tool_name: str, enforce_confidentiality: bool = ENFORCE_CONFIDE
             Integrity.TRUSTED,
             Confidentiality.PUBLIC if enforce_confidentiality else Confidentiality.PRIVATE,
         )
-    if any(keyword in name for keyword in SIDE_EFFECT_SINKS):
-        return Label(Integrity.TRUSTED, Confidentiality.PRIVATE)
-    return UNCONSTRAINED
+    if is_read_only(name):
+        return UNCONSTRAINED
+    # Everything else -- named side-effect sinks and tools this policy has
+    # never heard of alike -- must be reached from a trusted context.
+    return Label(Integrity.TRUSTED, Confidentiality.PRIVATE)
 
 
 @dataclass

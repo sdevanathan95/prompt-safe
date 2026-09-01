@@ -47,14 +47,35 @@ def test_a_value_that_only_appears_in_untrusted_content_carries_its_label():
     assert label.integrity is Integrity.UNTRUSTED
 
 
-def test_an_unattributable_value_falls_back_to_the_step_label():
-    """Computed or summarized values have no traceable source. Falling back to
-    the step's label keeps the conservative behaviour rather than inventing a
-    provenance this cannot actually establish."""
+def test_a_value_present_nowhere_was_computed_not_injected():
+    """An attacker's value has to appear in the retrieved content -- that is
+    the only channel they control. So a distinctive value in neither the task
+    nor any region was derived by the model, not injected. Treating those as
+    untrusted marked a fully user-specified calendar event as an attack purely
+    because its end time came from arithmetic."""
+    from middleware.screening.labels import Integrity as I
+
     label = argument_label(
         "a summary written by the model", regions(), TASK, fallback=UNTRUSTED_PRIVATE
     )
-    assert label == UNTRUSTED_PRIVATE
+    assert label.integrity is I.TRUSTED
+
+
+def test_short_unattributable_values_still_take_the_fallback():
+    """Values too small to identify match everything and establish nothing."""
+    assert argument_label("7", regions(), TASK, fallback=UNTRUSTED_PRIVATE) == UNTRUSTED_PRIVATE
+
+
+def test_confidentiality_stays_a_property_of_the_step_not_the_arguments():
+    """A leak is about what the step was allowed to see, not where the
+    recipient came from. Reading confidentiality per argument would miss every
+    leak whose secret sits in free text."""
+    from middleware.screening.labels import Confidentiality as C
+
+    label = call_label(
+        {"to": "colleague@example.com"}, regions(), TASK, fallback=UNTRUSTED_PRIVATE
+    )
+    assert label.confidentiality is C.PRIVATE
 
 
 def test_short_values_are_not_treated_as_evidence():
