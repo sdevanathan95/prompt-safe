@@ -60,6 +60,17 @@ PRIVATE_CONTENT_TOOLS = (
 # without list structure stay a single region.
 _LIST_ITEM_BOUNDARY = re.compile(r"^- ", re.MULTILINE)
 
+# Who authored a region, when the content says so. Labeling by tool alone
+# gives every region from one call the same label, which makes intra-response
+# redaction impossible: one poisoned email in an inbox cannot be masked while
+# the rest stay visible. RTBAS labels a region low-integrity when it carries
+# text from an external source, which is a property of the region, not of the
+# tool that fetched it.
+_AUTHOR_FIELD = re.compile(
+    r"^\s*(?:-\s*)?(?:sender|from|author|posted_by|user)\s*:\s*(\S+)",
+    re.MULTILINE | re.IGNORECASE,
+)
+
 _REGION_PATTERN = re.compile(
     r"<<(REGION_\d+)>>(.*?)<</\1>>",
     re.DOTALL,
@@ -98,6 +109,38 @@ def label_for_tool_output(tool_name: str) -> Label:
     return Label(integrity, confidentiality)
 
 
+def region_author(content: str) -> str | None:
+    """The declared author of a region, if the content names one."""
+    match = _AUTHOR_FIELD.search(content)
+    return match.group(1).strip().strip('"\'') if match else None
+
+
+def label_for_region(
+    tool_name: str,
+    content: str,
+    trusted_authors: frozenset[str] = frozenset(),
+) -> Label:
+    """Refine a tool's label using who actually wrote this region.
+
+    With no trusted authors configured this is exactly the tool-level label,
+    which is the conservative reading. Configuring them is what lets one
+    poisoned message be redacted while its neighbours survive — without it,
+    every region from a call shares a label and redaction can only ever mask
+    a whole tool response at a time.
+    """
+    base = label_for_tool_output(tool_name)
+    author = region_author(content)
+    if author is None or not trusted_authors:
+        return base
+
+    domain = author.rpartition("@")[2].lower()
+    is_trusted = author.lower() in trusted_authors or domain in trusted_authors
+    return Label(
+        Integrity.TRUSTED if is_trusted else Integrity.UNTRUSTED,
+        base.confidentiality,
+    )
+
+
 def split_content(content: str) -> list[str]:
     """Break one tool response into item-level spans. Non-overlapping and
     order-preserving: concatenating the results reproduces the input."""
@@ -115,6 +158,7 @@ def split_content(content: str) -> list[str]:
 def build_regions(
     tool_outputs: list[tuple[str, str]],
     start_index: int = 1,
+    trusted_authors: frozenset[str] = frozenset(),
 ) -> list[Region]:
     """Turn (tool_name, content) pairs into labeled regions with stable ids.
 
@@ -124,13 +168,12 @@ def build_regions(
     regions: list[Region] = []
     next_index = start_index
     for tool_name, content in tool_outputs:
-        label = label_for_tool_output(tool_name)
         for span in split_content(content):
             regions.append(
                 Region(
                     id=f"REGION_{next_index}",
                     content=span,
-                    label=label,
+                    label=label_for_region(tool_name, span, trusted_authors),
                     source_tool=tool_name,
                 )
             )

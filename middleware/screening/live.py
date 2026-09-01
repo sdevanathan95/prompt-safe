@@ -68,6 +68,11 @@ class Session:
     # ask_user verdict raises NeedsConfirmation instead.
     on_ask_user: Callable[[str, ToolCall], bool] | None = None
     logger: TraceLogger | None = None
+    # Authors whose content is treated as high-integrity — the user's own
+    # domain, known colleagues. Without this every region from one tool call
+    # carries the same label, so redaction can only mask a whole tool
+    # response at a time and never one poisoned message inside an inbox.
+    trusted_authors: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         self._tool_outputs: list[tuple[str, str]] = []
@@ -78,6 +83,25 @@ class Session:
         Call this after any tool execution the wrapped functions didn't
         themselves perform (e.g. a read the agent issued directly)."""
         self._tool_outputs.append((tool_name, str(output)))
+
+    def redacted_context(self) -> str:
+        """The tool history with regions the next decision must not depend on
+        replaced by a redaction marker.
+
+        Feed this to the agent instead of the raw tool outputs. A decorator
+        alone cannot enforce this: by the time a wrapped tool function is
+        called the model has already generated, so blocking is the only lever
+        left at that point. Redaction has to happen earlier, when the prompt
+        is built, which means the caller has to ask for it — hence a method
+        rather than something `protect` can do on its own.
+        """
+        screened = screen_step(
+            self._tool_outputs,
+            self.task_description,
+            self.judge_fn,
+            trusted_authors=self.trusted_authors,
+        )
+        return screened.redaction.text
 
     def protect(self, fn):
         """Wrap a tool function so it only runs after clearing Stages 1-3.
@@ -94,7 +118,12 @@ class Session:
             self._step += 1
             call = ToolCall(name=fn.__name__, arguments=kwargs)
 
-            screened = screen_step(self._tool_outputs, self.task_description, self.judge_fn)
+            screened = screen_step(
+                self._tool_outputs,
+                self.task_description,
+                self.judge_fn,
+                trusted_authors=self.trusted_authors,
+            )
             escalate_fn = None
             if self.melon_agent_call_fn is not None:
                 escalate_fn = make_escalate_fn(

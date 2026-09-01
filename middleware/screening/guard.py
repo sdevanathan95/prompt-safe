@@ -59,9 +59,12 @@ def screen_step(
     task_description: str,
     judge_fn: JudgeFn,
     start_index: int = 1,
+    trusted_authors: frozenset[str] = frozenset(),
 ) -> ScreenedStep:
     """Stage 1: tag, screen, redact. Call before the agent generates."""
-    regions = build_regions(tool_outputs, start_index=start_index)
+    regions = build_regions(
+        tool_outputs, start_index=start_index, trusted_authors=trusted_authors
+    )
     screen_result = screen(regions, task_description, judge_fn)
     return ScreenedStep(
         regions=regions,

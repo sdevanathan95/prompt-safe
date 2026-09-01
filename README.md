@@ -82,6 +82,28 @@ Pass `melon_agent_call_fn` to wire in Stage 3 for ambiguous cases, or
 `on_ask_user` to handle escalations Stage 3 can't resolve; leaving both unset
 raises `NeedsConfirmation` instead of asking anyone.
 
+### Redaction needs the caller's cooperation
+
+Blocking is only half the defense. The other half is never letting the model
+see the poisoned text in the first place — but a decorator cannot do that on
+its own, because by the time a wrapped tool function is called the model has
+already generated its decision. So the caller pulls the redacted history when
+building the next prompt:
+
+```python
+session = Session(task, judge_fn=openai_judge(),
+                  trusted_authors=frozenset({"company.com"}))
+session.observe("read_email", inbox)
+
+prompt_context = session.redacted_context()
+# -> the colleague's email survives; the poisoned one is replaced with ◊
+```
+
+`trusted_authors` is what makes this work at region granularity. Left unset,
+every region from a single tool call carries the same label, so redaction can
+only ever mask a whole tool response at a time — never one bad message inside
+an otherwise fine inbox.
+
 ## Running the benchmark
 
 ```
