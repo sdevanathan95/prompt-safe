@@ -1,0 +1,124 @@
+"""Live enforcement — gate a tool call before it executes.
+
+Everywhere else, `screening.guard` produces a verdict for a step that already
+happened, read back from a recorded trace: the shape a benchmark needs, where
+the agent has already run to completion and the question is only "would we
+have caught this." An agent that wants the middleware to actually stop a call
+needs the verdict *before* the call runs. This is that entrypoint — the
+`@guard(...)` decorator the project brief describes in §7.
+
+A `Session` holds the running state one agent turn needs (the task
+description, the tool outputs seen so far) and exposes `protect(fn)`, which
+wraps a tool function so that calling it screens, checks policy, and escalates
+first, and only calls the real function if the verdict says to.
+"""
+
+from __future__ import annotations
+
+import functools
+from dataclasses import dataclass
+from typing import Callable
+
+from middleware.melon.engine import AgentCallFn, make_escalate_fn
+from middleware.melon.types import ToolCall
+from middleware.screening.guard import check_calls, screen_step
+from middleware.screening.screener import JudgeFn
+from middleware.trace.logger import TraceLogger
+from middleware.trace.schema import StepTrace
+
+
+class Blocked(Exception):
+    """Raised in place of calling the wrapped function. The tool call never
+    ran — this is not "the call ran and then failed," the function body
+    itself never executed."""
+
+    def __init__(self, trace: StepTrace) -> None:
+        super().__init__(trace.explanation)
+        self.trace = trace
+
+
+class NeedsConfirmation(Exception):
+    """Raised when the verdict is ask_user and no confirmation callback was
+    given. A caller that wants to handle this itself should pass
+    on_ask_user to Session instead of catching this."""
+
+    def __init__(self, trace: StepTrace) -> None:
+        super().__init__(trace.explanation)
+        self.trace = trace
+
+
+@dataclass
+class Session:
+    """One agent turn's worth of state: the task it's working on, and every
+    tool output it has seen so far. Construct one per user request, not one
+    per process — task_description and the accumulated outputs are specific
+    to a single run.
+    """
+
+    task_description: str
+    judge_fn: JudgeFn
+    # Builds the masked run's next decision from a list of messages, exactly
+    # what middleware.melon.engine.run_melon_check expects. None disables
+    # Stage 3 — escalations fall back to on_ask_user or NeedsConfirmation,
+    # same as an unwired eval run.
+    melon_agent_call_fn: AgentCallFn | None = None
+    system_message: str | None = None
+    # Called with (explanation, ToolCall) when Stage 3 can't resolve a step
+    # on its own; return True to proceed, False to decline. Left unset, an
+    # ask_user verdict raises NeedsConfirmation instead.
+    on_ask_user: Callable[[str, ToolCall], bool] | None = None
+    logger: TraceLogger | None = None
+
+    def __post_init__(self) -> None:
+        self._tool_outputs: list[tuple[str, str]] = []
+        self._step = 0
+
+    def observe(self, tool_name: str, output) -> None:
+        """Record a tool's output so later calls are screened against it.
+        Call this after any tool execution the wrapped functions didn't
+        themselves perform (e.g. a read the agent issued directly)."""
+        self._tool_outputs.append((tool_name, str(output)))
+
+    def protect(self, fn):
+        """Wrap a tool function so it only runs after clearing Stages 1-3.
+
+        The wrapped function must be called with keyword arguments — that is
+        the shape every tool-calling API (OpenAI, Anthropic, Gemini) already
+        hands back, and it is what lets the call be rendered and screened as
+        `name(arg=value, ...)` without guessing parameter names from
+        positional args.
+        """
+
+        @functools.wraps(fn)
+        def wrapper(**kwargs):
+            self._step += 1
+            call = ToolCall(name=fn.__name__, arguments=kwargs)
+
+            screened = screen_step(self._tool_outputs, self.task_description, self.judge_fn)
+            escalate_fn = None
+            if self.melon_agent_call_fn is not None:
+                escalate_fn = make_escalate_fn(
+                    tool_output_text="\n\n".join(content for _, content in self._tool_outputs),
+                    agent_call_fn=self.melon_agent_call_fn,
+                    system_message=self.system_message,
+                )
+
+            result = check_calls(self._step, screened, [call], escalate_fn=escalate_fn)
+            trace = result.trace
+            if self.logger is not None:
+                self.logger.log(trace)
+
+            if trace.final_action == "block":
+                raise Blocked(trace)
+
+            if trace.final_action == "ask_user":
+                if self.on_ask_user is None:
+                    raise NeedsConfirmation(trace)
+                if not self.on_ask_user(trace.explanation, call):
+                    raise Blocked(trace)
+
+            output = fn(**kwargs)
+            self.observe(fn.__name__, output)
+            return output
+
+        return wrapper

