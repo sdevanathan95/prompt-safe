@@ -58,8 +58,10 @@ Every stage reads/writes the same trace object, defined in
 ```json
 {
   "step": int,
+  "context_label": {"integrity": "...", "confidentiality": "..."},
+  "policy_label": {"integrity": "...", "confidentiality": "..."},
   "source_provenance": "trusted" | "untrusted",
-  "screened_regions": [...],
+  "screened_regions": {"relevant": [...], "masked": [...], "labels": {...}},
   "policy_verdict": "safe" | "block" | "escalate",
   "melon_check": {
     "ran": bool,
@@ -68,9 +70,18 @@ Every stage reads/writes the same trace object, defined in
     "distance": float,
     "verdict": "safe" | "block" | null
   } | null,
-  "final_action": "execute" | "block" | "ask_user"
+  "final_action": "execute" | "block" | "ask_user",
+  "explanation": str
 }
 ```
+
+A label is a pair, not a single flag — the two axes move in opposite
+directions when labels are joined, so confidentiality cannot be recovered
+from a trusted/untrusted string. A step's verdict is exactly the comparison
+`context_label ⊑ policy_label`, so the trace records both sides: storing only
+the outcome would let the middleware assert a block it cannot explain.
+`source_provenance` is the integrity axis, kept for consumers written against
+the earlier single-axis shape.
 
 ## Setup
 
