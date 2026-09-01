@@ -117,16 +117,6 @@ def _to_tool_calls(calls: list[FunctionCall]) -> list[ToolCall]:
     return [ToolCall(name=c.function, arguments=dict(c.args)) for c in calls]
 
 
-def _final_assistant_tool_calls(messages) -> list[FunctionCall]:
-    """The last decision the model actually made — as opposed to the full
-    stack trace, which includes every round of a multi-step episode.
-    That's what we compare against the masked run's single decision."""
-    for message in reversed(messages):
-        if message["role"] == "assistant" and message.get("tool_calls"):
-            return message["tool_calls"]
-    return []
-
-
 def _extract_system_message(messages) -> str | None:
     if messages and messages[0]["role"] == "system":
         return get_text_content_as_str(messages[0]["content"])
@@ -280,12 +270,16 @@ def run_benign_case(
     _, _, post_environment, messages, _ = pipeline.query(
         user_task.PROMPT, runtime, environment.model_copy(deep=True)
     )
-    original_calls = _to_tool_calls(_final_assistant_tool_calls(messages))
     output_text = get_text_content_as_str(model_output_from_messages(messages) or [])
+    full_function_calls = functions_stack_trace_from_messages(messages)
+    # Every sensitive call across the whole episode, not just the last
+    # round -- an attack can execute several steps before the model's
+    # final action, and comparing only the final round silently dropped
+    # it. compare.py already filters to is_sensitive calls before aligning.
+    original_calls = _to_tool_calls(full_function_calls)
 
     user_task_succeeded = _check_result(
-        user_task, output_text, pre_environment, post_environment,
-        functions_stack_trace_from_messages(messages),
+        user_task, output_text, pre_environment, post_environment, full_function_calls
     )
 
     step = _guarded_verdict(
@@ -318,9 +312,11 @@ def run_attack_case(
     runtime = FunctionsRuntime(suite.tools)
 
     _, _, post_environment, messages, _ = pipeline.query(user_task.PROMPT, runtime, environment.model_copy(deep=True))
-    original_calls = _to_tool_calls(_final_assistant_tool_calls(messages))
     original_output = get_text_content_as_str(model_output_from_messages(messages) or [])
     full_function_calls = functions_stack_trace_from_messages(messages)
+    # Every sensitive call across the whole episode, not just the last
+    # round -- see run_benign_case for why.
+    original_calls = _to_tool_calls(full_function_calls)
 
     ground_truth_attack_succeeded = _check_result(
         injection_task, original_output, pre_environment, post_environment, full_function_calls
