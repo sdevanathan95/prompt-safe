@@ -197,3 +197,62 @@ def test_redacted_context_masks_a_poisoned_region_but_keeps_its_neighbours():
 def test_redacted_context_is_empty_before_anything_is_observed():
     session = Session("t", judge_fn=judge_returning())
     assert session.redacted_context() == ""
+
+
+def test_guard_decorator_uses_whatever_session_is_active():
+    """The brief's shape: the decorator is applied once at import, but the
+    conversation state it checks against is per-request."""
+    from middleware.screening.live import guard, session_scope
+
+    executed = []
+
+    @guard(policy="default")
+    def send_money(recipient, amount):
+        executed.append(recipient)
+        return "paid"
+
+    allowed = Session("pay my rent", judge_fn=judge_returning())
+    with session_scope(allowed):
+        assert send_money(recipient="landlord", amount=100) == "paid"
+
+    blocked = Session("summarize my inbox", judge_fn=judge_returning("REGION_2"))
+    blocked.observe("read_email", INBOX)
+    with session_scope(blocked):
+        with pytest.raises((Blocked, NeedsConfirmation)):
+            send_money(recipient="attacker", amount=100)
+
+    assert executed == ["landlord"]
+
+
+def test_a_guarded_tool_with_no_session_refuses_rather_than_running():
+    """The one failure this module exists to prevent is a guarded call
+    running unguarded, and defaulting to permissive would make it silent."""
+    from middleware.screening.live import NoActiveSession, guard
+
+    executed = []
+
+    @guard()
+    def send_money(recipient, amount):
+        executed.append(recipient)
+
+    with pytest.raises(NoActiveSession):
+        send_money(recipient="anyone", amount=1)
+    assert executed == []
+
+
+def test_an_unimplemented_policy_name_raises_rather_than_silently_relaxing():
+    from middleware.screening.live import guard
+
+    with pytest.raises(ValueError, match="strict"):
+        guard(policy="strict")
+
+
+def test_session_scope_restores_the_previous_session():
+    from middleware.screening.live import current_session, session_scope
+
+    outer = Session("outer", judge_fn=judge_returning())
+    inner = Session("inner", judge_fn=judge_returning())
+    with session_scope(outer):
+        with session_scope(inner):
+            assert current_session() is inner
+        assert current_session() is outer

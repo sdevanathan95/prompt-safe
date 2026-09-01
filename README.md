@@ -83,6 +83,35 @@ Pass `melon_agent_call_fn` to wire in Stage 3 for ambiguous cases, or
 `on_ask_user` to handle escalations Stage 3 can't resolve; leaving both unset
 raises `NeedsConfirmation` instead of asking anyone.
 
+Tool functions that are defined once at import — the usual case — use the
+decorator form instead, which resolves the active session when the call
+happens rather than when the function is defined:
+
+```python
+from middleware.screening.live import guard, session_scope
+
+@guard(policy="default")
+def send_email(to, subject, body):
+    ...
+
+with session_scope(Session(user_task, judge_fn=openai_judge())):
+    agent.run()
+```
+
+Calling a guarded tool with no session bound raises `NoActiveSession` rather
+than running it unguarded.
+
+### LangGraph
+
+```python
+from adapters.langgraph import protect_tools
+graph.add_node("tools", ToolNode(protect_tools(session, my_tools)))
+```
+
+`blocked_as_tool_message` wraps a protected tool so a refusal comes back to
+the model as an ordinary tool result instead of raising, for graphs that would
+rather let the model re-plan than tear the run down.
+
 ### Redaction needs the caller's cooperation
 
 Blocking is only half the defense. The other half is never letting the model

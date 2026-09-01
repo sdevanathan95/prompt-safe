@@ -15,6 +15,8 @@ first, and only calls the real function if the verdict says to.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
 from dataclasses import dataclass
 from typing import Callable
@@ -165,3 +167,72 @@ class Session:
             return output
 
         return wrapper
+
+
+# The brief (§7) specifies a module-level decorator that nonetheless "has
+# access to conversation state". Those two only reconcile if the decorator
+# resolves its session when the call happens rather than when the function is
+# defined — tool functions are defined once at import, while conversation
+# state is per-request. A context variable does that, and unlike a module
+# global it stays correct across threads and concurrent async tasks.
+_CURRENT_SESSION: contextvars.ContextVar[Session | None] = contextvars.ContextVar(
+    "prompt_safe_current_session", default=None
+)
+
+
+class NoActiveSession(RuntimeError):
+    """A guarded tool was called with no session bound.
+
+    Raised rather than defaulting to permissive: a guarded function running
+    unguarded is the one failure mode this module exists to prevent, and it
+    would be silent.
+    """
+
+
+@contextlib.contextmanager
+def session_scope(session: Session):
+    """Bind `session` for the duration of the block.
+
+        with session_scope(Session(task, judge_fn=openai_judge())):
+            agent.run()
+    """
+    token = _CURRENT_SESSION.set(session)
+    try:
+        yield session
+    finally:
+        _CURRENT_SESSION.reset(token)
+
+
+def current_session() -> Session:
+    session = _CURRENT_SESSION.get()
+    if session is None:
+        raise NoActiveSession(
+            "This tool is decorated with @guard but no session is bound. Wrap "
+            "the agent run in `with session_scope(Session(...)):`."
+        )
+    return session
+
+
+def guard(policy: str = "default"):
+    """Decorate a tool function so it is screened against the active session.
+
+    The `policy` argument is accepted because the brief's interface names it,
+    and only "default" is implemented — passing anything else raises rather
+    than silently applying the default, since a caller who asks for a stricter
+    policy and quietly gets the lenient one is worse off than one who gets an
+    error.
+    """
+    if policy != "default":
+        raise ValueError(
+            f"Unknown policy {policy!r}. Only 'default' is implemented; "
+            "configure the policy on the Session instead."
+        )
+
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(**kwargs):
+            return current_session().protect(fn)(**kwargs)
+
+        return wrapper
+
+    return decorate
