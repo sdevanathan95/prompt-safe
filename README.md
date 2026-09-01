@@ -42,13 +42,37 @@ middleware/
                tool-call comparison, embedding threshold logic
   trace/       Trace/state schema, logging — the artifact any
                visualizer reads
-adapters/      Provider adapters (OpenAI, Anthropic) + framework adapter
-               (LangGraph)
-eval/          Benchmark harness (AgentDojo / InjecAgent), metrics
-               reporting, hand-crafted test scenarios
-demo/          Live demo scenario, trace visualizer
+adapters/      Provider adapters (OpenAI, Anthropic) for the middleware's
+               own internal LLM calls — the judge and the masked run
+eval/          Benchmark harness (AgentDojo), metrics reporting,
+               hand-crafted test scenarios
+demo/          Trace visualizer — renders a run as an HTML report
 docs/          Project brief and design notes
 ```
+
+## Running the benchmark
+
+```
+python -m eval.harness --provider openai --suite banking \
+  --max-user-tasks 3 --max-injection-tasks 1 --trace-out traces.jsonl
+python -m demo.visualize traces.jsonl -o report.html
+```
+
+Makes real, paid LLM calls. The agent model and the judge model are chosen
+separately (`--model-id`, `--judge-model`): the judge answers one narrow
+relevance question on every step and is the dominant added cost if it runs on
+a frontier model.
+
+Five metrics are reported, and the first three have to be read together — a
+defense that stops every call scores perfectly on prevention and is useless:
+
+| Metric | What it means |
+|---|---|
+| benign utility | task success with no attacker present |
+| utility under attack | task success while being hijacked |
+| attack prevention rate | share of genuinely successful attacks stopped |
+| false positive rate | share of benign steps wrongly stopped |
+| escalation / auto-resolution | share of steps needing the counterfactual test, and how many it settled without a human |
 
 ## The shared trace contract
 

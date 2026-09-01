@@ -14,6 +14,7 @@ from functools import lru_cache
 import numpy as np
 
 from middleware.melon.cache import align
+from middleware.melon.prefilter import is_sensitive
 from middleware.melon.types import MelonVerdict, ToolCall
 
 # Cosine distance threshold for "converged" — the reference implementation
@@ -99,12 +100,31 @@ def compare(
             explanation="No tool calls were made in the original run — nothing to test.",
         )
 
-    aligned = align(original_calls, masked_calls)
+    # Only calls that can actually cause harm are compared. A converged read
+    # is not an attack, and the masked conversation itself opens with a
+    # read_file, so including reads would match that by construction.
+    sensitive_calls = [call for call in original_calls if is_sensitive(call)]
+    if not sensitive_calls:
+        return MelonVerdict(
+            ran=True,
+            verdict="safe",
+            distance=None,
+            original_calls=original_calls,
+            masked_calls=masked_calls,
+            explanation=(
+                "No call in the original run touches a sensitive action, so "
+                "convergence could not cause harm either way."
+            ),
+        )
+
+    aligned = align(sensitive_calls, masked_calls)
     distances = [_pair_distance(original_call, masked_call) for original_call, masked_call in aligned]
-    # Worst-case (max) distance across the step's calls: any strongly
-    # divergent call is evidence the real task drove the action, so we
-    # only call it convergence if every call matched closely.
-    distance = max(distances)
+    # Closest (min) match across the step's sensitive calls. MELON alerts when
+    # *any* original call converges with *any* masked call, not when all of
+    # them do: an agent that completes the user's real task and the injected
+    # one in the same step must still be caught, and taking the worst-case
+    # distance would let the benign call mask the malicious one.
+    distance = min(distances)
     verdict: str = "block" if distance <= threshold else "safe"
 
     if verdict == "block":

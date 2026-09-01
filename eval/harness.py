@@ -56,6 +56,13 @@ from agentdojo.types import text_content_block_from_string
 from middleware.melon.compare import DEFAULT_THRESHOLD
 from middleware.melon.engine import AgentCallFn, run_melon_check
 from middleware.melon.types import MelonVerdict, ToolCall
+from middleware.screening.guard import StepResult, check_calls, screen_step
+from adapters.judge import (
+    DEFAULT_ANTHROPIC_JUDGE_MODEL,
+    DEFAULT_OPENAI_JUDGE_MODEL,
+    anthropic_judge,
+    openai_judge,
+)
 
 # Provider clients read their key from the environment. Does not override a
 # key already exported in the shell.
@@ -77,6 +84,16 @@ class CaseResult:
     injection_task_id: str | None  # None => benign condition, no attack
     ground_truth_attack_succeeded: bool | None  # None for the benign condition
     melon_verdict: MelonVerdict
+    # Whether the agent actually completed the user's real task. Tracked in
+    # both conditions, because a defense that blocks everything scores
+    # perfectly on attacks and destroys the agent's usefulness.
+    user_task_succeeded: bool | None = None
+    # Stage 2's verdict and the step's final disposition. `final_action` is
+    # the authoritative defense outcome: melon_verdict is only populated for
+    # the steps that escalated that far.
+    policy_verdict: str | None = None
+    final_action: str | None = None
+    trace: dict | None = None
 
 
 def build_pipeline(provider: str, model_id: str | None = None) -> tuple[BasePipelineElement, BasePipelineElement]:
@@ -127,6 +144,16 @@ def _extract_tool_output_text(messages) -> str:
             function_name = message["tool_call"].function
             blocks.append(f"{'=' * 50}\n\nfunction: {function_name}\n\n{content}\n\n{'=' * 50}")
     return "\n\n".join(blocks)
+
+
+def _extract_tool_outputs(messages) -> list[tuple[str, str]]:
+    """The same tool results, kept split by originating function so the
+    screener can label and redact them per region rather than as one blob."""
+    return [
+        (message["tool_call"].function, get_text_content_as_str(message["content"]))
+        for message in messages
+        if message["role"] == "tool"
+    ]
 
 
 def _to_agentdojo_messages(messages: list[dict]) -> list:
@@ -203,28 +230,78 @@ def _check_result(
     return task.security(output_text, pre_environment, post_environment)
 
 
+def _guarded_verdict(
+    llm_element: BasePipelineElement,
+    suite: TaskSuite,
+    environment,
+    user_task: BaseUserTask,
+    messages,
+    original_calls: list[ToolCall],
+    judge_fn,
+    threshold: float,
+    step: int = 1,
+) -> StepResult:
+    """Run the full tiered pipeline over one finished episode.
+
+    Stage 1 screens and redacts, Stage 2 decides, and Stage 3 runs only for
+    the steps Stage 2 could not settle — the tiering the project is actually
+    about. With no judge available, screening is skipped and every step is
+    treated as depending on all its tool output, which is the conservative
+    reading and matches taint tracking without a screener.
+    """
+    screened = screen_step(
+        _extract_tool_outputs(messages),
+        task_description=user_task.PROMPT,
+        judge_fn=judge_fn,
+    )
+
+    def escalate_fn(calls: list[ToolCall]) -> MelonVerdict:
+        agent_call_fn = _make_agent_call_fn(llm_element, suite, environment.model_copy(deep=True))
+        return run_melon_check(
+            calls,
+            tool_output_text=_extract_tool_output_text(messages),
+            agent_call_fn=agent_call_fn,
+            system_message=_extract_system_message(messages),
+            threshold=threshold,
+        )
+
+    return check_calls(step, screened, original_calls, escalate_fn=escalate_fn)
+
+
 def run_benign_case(
     pipeline: BasePipelineElement,
     llm_element: BasePipelineElement,
     suite: TaskSuite,
     user_task: BaseUserTask,
+    judge_fn,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> CaseResult:
     environment = suite.load_and_inject_default_environment({})
+    pre_environment = environment.model_copy(deep=True)
     runtime = FunctionsRuntime(suite.tools)
 
-    _, _, _, messages, _ = pipeline.query(user_task.PROMPT, runtime, environment.model_copy(deep=True))
-    original_calls = _to_tool_calls(_final_assistant_tool_calls(messages))
-
-    agent_call_fn = _make_agent_call_fn(llm_element, suite, environment.model_copy(deep=True))
-    verdict = run_melon_check(
-        original_calls,
-        tool_output_text=_extract_tool_output_text(messages),
-        agent_call_fn=agent_call_fn,
-        system_message=_extract_system_message(messages),
-        threshold=threshold,
+    _, _, post_environment, messages, _ = pipeline.query(
+        user_task.PROMPT, runtime, environment.model_copy(deep=True)
     )
-    return CaseResult(user_task.ID, None, None, verdict)
+    original_calls = _to_tool_calls(_final_assistant_tool_calls(messages))
+    output_text = get_text_content_as_str(model_output_from_messages(messages) or [])
+
+    user_task_succeeded = _check_result(
+        user_task, output_text, pre_environment, post_environment,
+        functions_stack_trace_from_messages(messages),
+    )
+
+    step = _guarded_verdict(
+        llm_element, suite, environment, user_task, messages, original_calls,
+        judge_fn, threshold,
+    )
+    return CaseResult(
+        user_task.ID, None, None, step.melon_verdict or _not_escalated(original_calls),
+        user_task_succeeded=user_task_succeeded,
+        policy_verdict=step.trace.policy_verdict,
+        final_action=step.trace.final_action,
+        trace=step.trace.to_dict(),
+    )
 
 
 def run_attack_case(
@@ -234,6 +311,7 @@ def run_attack_case(
     user_task: BaseUserTask,
     attack: BaseAttack,
     injection_task_id: str,
+    judge_fn,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> CaseResult:
     injection_task = suite.get_injection_task_by_id(injection_task_id)
@@ -250,16 +328,31 @@ def run_attack_case(
     ground_truth_attack_succeeded = _check_result(
         injection_task, original_output, pre_environment, post_environment, full_function_calls
     )
-
-    agent_call_fn = _make_agent_call_fn(llm_element, suite, environment.model_copy(deep=True))
-    verdict = run_melon_check(
-        original_calls,
-        tool_output_text=_extract_tool_output_text(messages),
-        agent_call_fn=agent_call_fn,
-        system_message=_extract_system_message(messages),
-        threshold=threshold,
+    user_task_succeeded = _check_result(
+        user_task, original_output, pre_environment, post_environment, full_function_calls
     )
-    return CaseResult(user_task.ID, injection_task_id, ground_truth_attack_succeeded, verdict)
+
+    step = _guarded_verdict(
+        llm_element, suite, environment, user_task, messages, original_calls,
+        judge_fn, threshold,
+    )
+    return CaseResult(
+        user_task.ID, injection_task_id, ground_truth_attack_succeeded,
+        step.melon_verdict or _not_escalated(original_calls),
+        user_task_succeeded=user_task_succeeded,
+        policy_verdict=step.trace.policy_verdict,
+        final_action=step.trace.final_action,
+        trace=step.trace.to_dict(),
+    )
+
+
+def _not_escalated(original_calls: list[ToolCall]) -> MelonVerdict:
+    """Placeholder verdict for a step the policy check settled on its own —
+    the counterfactual test never ran, which is the intended fast path."""
+    return MelonVerdict(
+        ran=False, verdict=None, distance=None, original_calls=original_calls,
+        explanation="Resolved at the policy check; the counterfactual test was not needed.",
+    )
 
 
 def run_suite_subset(
@@ -271,6 +364,7 @@ def run_suite_subset(
     model_id: str | None = None,
     threshold: float = DEFAULT_THRESHOLD,
     max_injection_tasks: int | None = None,
+    judge_model: str | None = None,
 ) -> list[CaseResult]:
     """Runs the benign case plus one attack per injection task (capped at
     `max_injection_tasks` if given — a suite typically has more than one)
@@ -283,6 +377,7 @@ def run_suite_subset(
     suite = get_suite(benchmark_version, suite_name)
     pipeline, llm_element = build_pipeline(provider, model_id)
     attack = load_attack(attack_name, suite, pipeline)
+    judge_fn = build_judge(provider, judge_model)
 
     user_task_ids = list(suite.user_tasks.keys())[:max_user_tasks]
     injection_task_ids = list(suite.injection_tasks.keys())[:max_injection_tasks]
@@ -290,11 +385,25 @@ def run_suite_subset(
 
     for user_task_id in user_task_ids:
         user_task = suite.get_user_task_by_id(user_task_id)
-        results.append(run_benign_case(pipeline, llm_element, suite, user_task, threshold))
+        results.append(run_benign_case(pipeline, llm_element, suite, user_task, judge_fn, threshold))
         for injection_task_id in injection_task_ids:
-            results.append(run_attack_case(pipeline, llm_element, suite, user_task, attack, injection_task_id, threshold))
+            results.append(
+                run_attack_case(
+                    pipeline, llm_element, suite, user_task, attack,
+                    injection_task_id, judge_fn, threshold,
+                )
+            )
 
     return results
+
+
+def build_judge(provider: str, judge_model: str | None = None):
+    """The screener's own model. Kept separate from the agent's model: the
+    judge answers one narrow relevance question and is the dominant added cost
+    if run on a frontier model."""
+    if provider == "openai":
+        return openai_judge(judge_model or DEFAULT_OPENAI_JUDGE_MODEL)
+    return anthropic_judge(judge_model or DEFAULT_ANTHROPIC_JUDGE_MODEL)
 
 
 if __name__ == "__main__":
@@ -308,6 +417,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-injection-tasks", type=int, default=None)
     parser.add_argument("--attack", default=DEFAULT_ATTACK_NAME)
     parser.add_argument("--model-id", default=None)
+    parser.add_argument("--judge-model", default=None)
+    parser.add_argument("--trace-out", default=None, help="Write per-step traces as JSON Lines.")
     args = parser.parse_args()
 
     case_results = run_suite_subset(
@@ -318,32 +429,50 @@ if __name__ == "__main__":
         attack_name=args.attack,
         model_id=args.model_id,
         max_injection_tasks=args.max_injection_tasks,
+        judge_model=args.judge_model,
     )
 
     for result in case_results:
         print(
             f"{result.user_task_id} injection={result.injection_task_id} "
-            f"ground_truth_attack_succeeded={result.ground_truth_attack_succeeded} "
-            f"verdict={result.melon_verdict.verdict} distance={result.melon_verdict.distance}"
+            f"attack_succeeded={result.ground_truth_attack_succeeded} "
+            f"task_succeeded={result.user_task_succeeded} "
+            f"policy={result.policy_verdict} action={result.final_action} "
+            f"distance={result.melon_verdict.distance}"
         )
+
+    if args.trace_out:
+        import json as _json
+
+        with open(args.trace_out, "w", encoding="utf-8") as handle:
+            for result in case_results:
+                if result.trace is not None:
+                    handle.write(_json.dumps({**result.trace, "case": result.user_task_id,
+                                              "injection": result.injection_task_id}) + "\n")
+        print(f"\ntraces written to {args.trace_out}")
 
     # Imported here, not at module level: eval.metrics imports CaseResult
     # from this module, so importing compute_metrics back at the top would
     # be a circular import. CLI-only usage, so a local import is fine.
     from eval.metrics import compute_metrics
 
+    def pct(value, absent="n/a"):
+        return f"{value:.1%}" if value is not None else absent
+
     report = compute_metrics(case_results)
     print()
-    print(f"total cases:              {report.total_cases}")
-    print(f"benign cases:              {report.benign_cases}")
-    print(f"attack cases:              {report.attack_cases}")
-    print(f"attacks actually succeeded: {report.attacks_actually_succeeded}")
-    print(f"attacks blocked:           {report.attacks_blocked}")
-    print(
-        "attack prevention rate:    "
-        + (f"{report.attack_prevention_rate:.1%}" if report.attack_prevention_rate is not None else "n/a (no successful attacks in this run)")
-    )
-    print(
-        "false positive rate:       "
-        + (f"{report.false_positive_rate:.1%}" if report.false_positive_rate is not None else "n/a (no benign cases in this run)")
-    )
+    print(f"total cases:                {report.total_cases}")
+    print(f"benign / attack cases:      {report.benign_cases} / {report.attack_cases}")
+    print()
+    print("--- the three that must be read together ---")
+    print(f"benign utility:             {pct(report.benign_utility)}")
+    print(f"utility under attack:       {pct(report.utility_under_attack)}")
+    print(f"attacks actually succeeded: {report.attacks_actually_succeeded} of {report.attack_cases}")
+    print(f"attack prevention rate:     {pct(report.attack_prevention_rate, 'n/a (no successful attacks)')}")
+    print(f"false positive rate:        {pct(report.false_positive_rate, 'n/a (no benign cases)')}")
+    print()
+    print("--- the tiering (this project's claim) ---")
+    print(f"escalation rate:            {pct(report.escalation_rate)}")
+    print(f"auto-resolution rate:       {pct(report.auto_resolution_rate, 'n/a (nothing escalated)')}")
+    print(f"auto-resolution accuracy:   {pct(report.auto_resolution_accuracy, 'n/a (no ground truth)')}")
+    print(f"human confirmations left:   {report.human_confirmations}")
