@@ -19,6 +19,7 @@ import functools
 from dataclasses import dataclass
 from typing import Callable
 
+from middleware.melon.cache import ToolCallCache
 from middleware.melon.engine import AgentCallFn, make_escalate_fn
 from middleware.melon.types import ToolCall
 from middleware.screening.guard import check_calls, screen_step
@@ -82,6 +83,10 @@ class Session:
     def __post_init__(self) -> None:
         self._tool_outputs: list[tuple[str, str]] = []
         self._step = 0
+        # MELON's H, accumulated across the whole session: an agent that
+        # completes the real task first and acts on the injection later is
+        # only caught if earlier masked calls are still being compared.
+        self._masked_call_cache = ToolCallCache()
 
     def observe(self, tool_name: str, output) -> None:
         """Record a tool's output so later calls are screened against it.
@@ -135,6 +140,7 @@ class Session:
                     tool_output_text="\n\n".join(content for _, content in self._tool_outputs),
                     agent_call_fn=self.melon_agent_call_fn,
                     system_message=self.system_message,
+                    cache=self._masked_call_cache,
                 )
 
             result = check_calls(

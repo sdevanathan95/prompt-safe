@@ -42,8 +42,9 @@ middleware/
                tool-call comparison, embedding threshold logic
   trace/       Trace/state schema, logging — the artifact any
                visualizer reads
-adapters/      Provider adapters (OpenAI, Anthropic) for the middleware's
-               own internal LLM calls — the judge and the masked run
+adapters/      Provider adapters for the middleware's own internal calls:
+               the LM judge, and the embedding model the counterfactual
+               comparison thresholds on
 eval/          Benchmark harness (AgentDojo), metrics reporting,
                hand-crafted test scenarios
 demo/          Trace visualizer — renders a run as an HTML report

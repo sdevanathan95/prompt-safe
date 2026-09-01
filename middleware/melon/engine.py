@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from middleware.melon.cache import ToolCallCache
 from middleware.melon.compare import DEFAULT_THRESHOLD, compare
 from middleware.melon.masking import GENERAL_INSTRUCTIONS, build_masked_messages
 from middleware.melon.prefilter import prefiltered_safe_verdict, should_run_melon_check
@@ -45,12 +46,25 @@ def run_melon_check(
     agent_call_fn: AgentCallFn,
     system_message: str | None = None,
     threshold: float = DEFAULT_THRESHOLD,
+    cache: ToolCallCache | None = None,
 ) -> MelonVerdict:
+    """One step of the counterfactual test.
+
+    `cache` is the paper's H. Pass the same cache across a session and the
+    comparison runs against every call the masked run has made so far, which
+    is what catches an agent that finishes the user's real task first and only
+    then acts on the injected instruction. Omit it and the check is
+    single-step, which is all a post-hoc benchmark can offer anyway.
+    """
     if not should_run_melon_check(original_calls):
         return prefiltered_safe_verdict(original_calls)
 
     masked_messages = build_masked_messages(tool_output_text, system_message)
     masked_calls = agent_call_fn(masked_messages)
+
+    if cache is not None:
+        cache.add_all(masked_calls)
+        masked_calls = cache.calls
 
     verdict = compare(original_calls, masked_calls, threshold)
     verdict.placeholder_task = GENERAL_INSTRUCTIONS
@@ -62,8 +76,12 @@ def make_escalate_fn(
     agent_call_fn: AgentCallFn,
     system_message: str | None = None,
     threshold: float = DEFAULT_THRESHOLD,
+    cache: ToolCallCache | None = None,
 ) -> Callable[[list[ToolCall]], MelonVerdict]:
     def escalate_fn(proposed_calls: list[ToolCall]) -> MelonVerdict:
-        return run_melon_check(proposed_calls, tool_output_text, agent_call_fn, system_message, threshold)
+        return run_melon_check(
+            proposed_calls, tool_output_text, agent_call_fn, system_message,
+            threshold, cache,
+        )
 
     return escalate_fn
