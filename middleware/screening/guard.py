@@ -21,6 +21,7 @@ from middleware.melon.types import MelonVerdict, ToolCall
 from middleware.screening import policy
 from middleware.screening.labels import Label
 from middleware.screening.redactor import RedactionResult, redact
+from middleware.screening.provenance import call_label, explain_call_label
 from middleware.screening.regions import Region, build_regions, labels_by_id
 from middleware.screening.screener import JudgeFn, ScreenResult, screen
 from middleware.trace.schema import FinalAction, ScreenedRegions, StepTrace
@@ -48,6 +49,7 @@ class ScreenedStep:
     regions: list[Region]
     screen_result: ScreenResult
     redaction: RedactionResult
+    task_description: str = ""
 
     @property
     def label(self) -> Label:
@@ -70,6 +72,7 @@ def screen_step(
         regions=regions,
         screen_result=screen_result,
         redaction=redact(regions, screen_result.label),
+        task_description=task_description,
     )
 
 
@@ -81,9 +84,18 @@ def check_calls(
     enforce_confidentiality: bool = policy.ENFORCE_CONFIDENTIALITY_BY_DEFAULT,
 ) -> StepResult:
     """Stage 2, escalating to Stage 3 only for the ambiguous bucket."""
-    decisions = [
-        policy.check(call.name, screened.label, enforce_confidentiality)
+    # Per-argument provenance rather than the step's joined label. The join
+    # makes every call in a turn as untrusted as the most untrusted region
+    # that turn depended on, even when this particular call's arguments all
+    # came from the user; that is the bulk of the escalation volume, and each
+    # escalation costs a second model call.
+    call_labels = [
+        call_label(call.arguments, screened.regions, screened.task_description, screened.label)
         for call in proposed_calls
+    ]
+    decisions = [
+        policy.check(call.name, label, enforce_confidentiality)
+        for call, label in zip(proposed_calls, call_labels)
     ]
     verdict = _worst_verdict(decisions)
     driving = _driving_decision(decisions, verdict)
@@ -112,9 +124,12 @@ def check_calls(
         melon_verdict = escalate_fn(proposed_calls)
         final_action, explanation = _resolve_escalation(melon_verdict, driving)
 
+    driving_label = (
+        call_labels[decisions.index(driving)] if driving is not None else screened.label
+    )
     trace = StepTrace(
         step=step,
-        context_label=screened.label.to_dict(),
+        context_label=driving_label.to_dict(),
         policy_label=(driving.policy_label.to_dict() if driving else screened.label.to_dict()),
         screened_regions=ScreenedRegions(
             relevant=list(screened.screen_result.relevant_ids),
@@ -126,6 +141,14 @@ def check_calls(
         final_action=final_action,
         explanation=explanation,
     )
+    if driving is not None and verdict != "safe":
+        trace.explanation += " " + explain_call_label(
+            proposed_calls[decisions.index(driving)].arguments,
+            screened.regions,
+            screened.task_description,
+            screened.label,
+        )
+
     return StepResult(trace, screened.redaction, decisions, melon_verdict)
 
 

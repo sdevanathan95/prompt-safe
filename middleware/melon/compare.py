@@ -125,6 +125,9 @@ def compare(
         )
 
     similarity, original_match, masked_match = most_similar_pair(sensitive_calls, masked_calls)
+    # Clamped: float error on identical vectors otherwise reports a
+    # negative distance, which reads as a bug in any trace that shows it.
+    similarity = min(1.0, max(0.0, similarity))
     distance = 1.0 - similarity
     verdict = "block" if similarity > similarity_threshold else "safe"
 
