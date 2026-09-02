@@ -112,7 +112,7 @@ def label_for_tool_output(tool_name: str) -> Label:
 def region_author(content: str) -> str | None:
     """The declared author of a region, if the content names one."""
     match = _AUTHOR_FIELD.search(content)
-    return match.group(1).strip().strip('"\'') if match else None
+    return match.group(1).strip().strip("\"'") if match else None
 
 
 def label_for_region(
@@ -151,7 +151,9 @@ def split_content(content: str) -> list[str]:
     # Text before the first list item (a header line, usually) stays with the
     # first item rather than becoming a region of its own.
     starts = [0] + [b for b in boundaries if b > 0]
-    spans = [content[start:end] for start, end in zip(starts, starts[1:] + [len(content)])]
+    spans = [
+        content[start:end] for start, end in zip(starts, starts[1:] + [len(content)])
+    ]
     return [span for span in spans if span.strip()]
 
 
@@ -203,7 +205,9 @@ def _strip_markers(content: str) -> str:
 
 def parse_tagged(text: str) -> list[tuple[str, str]]:
     """Recover (region_id, content) pairs from rendered text."""
-    return [(match.group(1), match.group(2)) for match in _REGION_PATTERN.finditer(text)]
+    return [
+        (match.group(1), match.group(2)) for match in _REGION_PATTERN.finditer(text)
+    ]
 
 
 def dependency_label(regions: list[Region], relevant_ids) -> Label:

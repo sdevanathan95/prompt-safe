@@ -41,9 +41,7 @@ def test_a_value_the_user_typed_is_trusted_despite_untrusted_context():
 def test_a_value_that_only_appears_in_untrusted_content_carries_its_label():
     """AgentArmor Case Study A: tool name and control flow are untouched, only
     the argument was rewritten. Watching the call as one unit cannot see it."""
-    label = argument_label(
-        "US133000000121212121212", regions(), TASK, fallback=BOTTOM
-    )
+    label = argument_label("US133000000121212121212", regions(), TASK, fallback=BOTTOM)
     assert label.integrity is Integrity.UNTRUSTED
 
 
@@ -63,7 +61,10 @@ def test_a_value_present_nowhere_was_computed_not_injected():
 
 def test_short_unattributable_values_still_take_the_fallback():
     """Values too small to identify match everything and establish nothing."""
-    assert argument_label("7", regions(), TASK, fallback=UNTRUSTED_PRIVATE) == UNTRUSTED_PRIVATE
+    assert (
+        argument_label("7", regions(), TASK, fallback=UNTRUSTED_PRIVATE)
+        == UNTRUSTED_PRIVATE
+    )
 
 
 def test_confidentiality_stays_a_property_of_the_step_not_the_arguments():
@@ -86,7 +87,10 @@ def test_short_values_are_not_treated_as_evidence():
     assert not is_distinctive(True)
     assert is_distinctive("ABC12345678")
 
-    assert argument_label(1, regions(), TASK, fallback=UNTRUSTED_PRIVATE) == UNTRUSTED_PRIVATE
+    assert (
+        argument_label(1, regions(), TASK, fallback=UNTRUSTED_PRIVATE)
+        == UNTRUSTED_PRIVATE
+    )
 
 
 def test_matching_ignores_punctuation_and_case():
@@ -101,13 +105,17 @@ def test_call_label_joins_over_every_argument():
     """One tainted argument taints the call, even beside clean ones."""
     label = call_label(
         {"recipient": "US133000000121212121212", "note": "December rent"},
-        regions(), TASK, fallback=BOTTOM,
+        regions(),
+        TASK,
+        fallback=BOTTOM,
     )
     assert label.integrity is Integrity.UNTRUSTED
 
 
 def test_a_call_with_no_arguments_takes_the_step_label():
-    assert call_label({}, regions(), TASK, fallback=UNTRUSTED_PRIVATE) == UNTRUSTED_PRIVATE
+    assert (
+        call_label({}, regions(), TASK, fallback=UNTRUSTED_PRIVATE) == UNTRUSTED_PRIVATE
+    )
 
 
 def test_explanation_names_the_offending_argument():
@@ -116,5 +124,7 @@ def test_explanation_names_the_offending_argument():
     )
     assert "recipient" in text
 
-    clean = explain_call_label({"recipient": "ABC12345678"}, regions(), TASK, fallback=BOTTOM)
+    clean = explain_call_label(
+        {"recipient": "ABC12345678"}, regions(), TASK, fallback=BOTTOM
+    )
     assert "user's own request" in clean

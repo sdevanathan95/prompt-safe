@@ -5,3 +5,4 @@ sentence-transformers==6.0.0
 numpy==2.5.2
 pytest==9.1.1
 agentdojo==0.1.35
+ruff==0.16.5

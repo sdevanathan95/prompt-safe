@@ -35,8 +35,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from dotenv import load_dotenv
-
 from agentdojo.agent_pipeline import AgentPipeline, PipelineConfig
 from agentdojo.agent_pipeline.base_pipeline_element import BasePipelineElement
 from agentdojo.agent_pipeline.llms.anthropic_llm import AnthropicLLM
@@ -53,21 +51,22 @@ from agentdojo.task_suite.task_suite import (
     model_output_from_messages,
 )
 from agentdojo.types import text_content_block_from_string
+from dotenv import load_dotenv
 
-from middleware.melon.compare import DEFAULT_THRESHOLD
-from middleware.melon.engine import AgentCallFn, make_escalate_fn, run_melon_check
-from middleware.melon.types import MelonVerdict, ToolCall
-from middleware.screening.alignment import check_alignment
-from middleware.screening.guard import StepResult, check_calls, screen_step
-from middleware.screening.provenance import source_regions_for_call
-from middleware.screening.regions import build_regions
-from adapters.retry import with_retry
 from adapters.judge import (
     DEFAULT_ANTHROPIC_JUDGE_MODEL,
     DEFAULT_OPENAI_JUDGE_MODEL,
     anthropic_judge,
     openai_judge,
 )
+from adapters.retry import with_retry
+from middleware.melon.compare import DEFAULT_THRESHOLD
+from middleware.melon.engine import AgentCallFn, run_melon_check
+from middleware.melon.types import MelonVerdict, ToolCall
+from middleware.screening.alignment import check_alignment
+from middleware.screening.guard import StepResult, check_calls, screen_step
+from middleware.screening.provenance import source_regions_for_call
+from middleware.screening.regions import build_regions
 
 # Provider clients read their key from the environment. Does not override a
 # key already exported in the shell.
@@ -116,14 +115,21 @@ def build_llm_element(provider: str, model_id: str) -> BasePipelineElement:
     with Stage 1 rather than added to it.
     """
     config = PipelineConfig(
-        llm=model_id, model_id=None, defense=None,
-        system_message_name=None, system_message=None,
+        llm=model_id,
+        model_id=None,
+        defense=None,
+        system_message_name=None,
+        system_message=None,
     )
     pipeline = AgentPipeline.from_config(config)
-    return next(e for e in pipeline.elements if isinstance(e, (OpenAILLM, AnthropicLLM)))
+    return next(
+        e for e in pipeline.elements if isinstance(e, (OpenAILLM, AnthropicLLM))
+    )
 
 
-def build_pipeline(provider: str, model_id: str | None = None) -> tuple[BasePipelineElement, BasePipelineElement]:
+def build_pipeline(
+    provider: str, model_id: str | None = None
+) -> tuple[BasePipelineElement, BasePipelineElement]:
     """Returns (full_pipeline, llm_element) — the llm element is needed
     directly for the masked run, which makes one decision rather than
     running the full multi-step loop."""
@@ -136,7 +142,9 @@ def build_pipeline(provider: str, model_id: str | None = None) -> tuple[BasePipe
         system_message=None,
     )
     pipeline = AgentPipeline.from_config(config)
-    llm_element = next(e for e in pipeline.elements if isinstance(e, (OpenAILLM, AnthropicLLM)))
+    llm_element = next(
+        e for e in pipeline.elements if isinstance(e, (OpenAILLM, AnthropicLLM))
+    )
     return pipeline, llm_element
 
 
@@ -180,7 +188,9 @@ def _extract_tool_output_text(messages) -> str:
         if message["role"] == "tool":
             content = get_text_content_as_str(message["content"])
             function_name = message["tool_call"].function
-            blocks.append(f"{'=' * 50}\n\nfunction: {function_name}\n\n{content}\n\n{'=' * 50}")
+            blocks.append(
+                f"{'=' * 50}\n\nfunction: {function_name}\n\n{content}\n\n{'=' * 50}"
+            )
     return "\n\n".join(blocks)
 
 
@@ -222,16 +232,32 @@ def _to_agentdojo_messages(messages: list[dict]) -> list:
     for m in messages:
         role = m["role"]
         if role in ("system", "user"):
-            result.append({"role": role, "content": [text_content_block_from_string(m["content"])]})
+            result.append(
+                {
+                    "role": role,
+                    "content": [text_content_block_from_string(m["content"])],
+                }
+            )
         elif role == "assistant":
             tool_calls = None
             if m.get("tool_calls"):
                 tool_calls = [
-                    FunctionCall(function=tc["function"], args=tc["arguments"], id=f"melon-mask-{i}", placeholder_args=None)
+                    FunctionCall(
+                        function=tc["function"],
+                        args=tc["arguments"],
+                        id=f"melon-mask-{i}",
+                        placeholder_args=None,
+                    )
                     for i, tc in enumerate(m["tool_calls"])
                 ]
-            content = [text_content_block_from_string(m["content"])] if m.get("content") else None
-            result.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+            content = (
+                [text_content_block_from_string(m["content"])]
+                if m.get("content")
+                else None
+            )
+            result.append(
+                {"role": "assistant", "content": content, "tool_calls": tool_calls}
+            )
         elif role == "tool":
             # Each fabricated tool message in masking.py immediately
             # follows an assistant message with exactly one tool call.
@@ -260,7 +286,9 @@ def _to_agentdojo_messages(messages: list[dict]) -> list:
 MASKED_RUN_MAX_TURNS = 4
 
 
-def _make_agent_call_fn(llm_element: BasePipelineElement, suite: TaskSuite, environment) -> AgentCallFn:
+def _make_agent_call_fn(
+    llm_element: BasePipelineElement, suite: TaskSuite, environment
+) -> AgentCallFn:
     """Adapt the masked conversation into a short AgentDojo run.
 
     The masked run is a probe, not the user's agent: its tool calls execute
@@ -276,7 +304,9 @@ def _make_agent_call_fn(llm_element: BasePipelineElement, suite: TaskSuite, envi
 
         for _ in range(MASKED_RUN_MAX_TURNS):
             _, _, _, conversation, _ = with_retry(
-                lambda: llm_element.query("", runtime, environment, conversation, {})
+                lambda conversation=conversation: llm_element.query(
+                    "", runtime, environment, conversation, {}
+                )
             )
             calls = conversation[-1].get("tool_calls") or []
             if not calls:
@@ -318,12 +348,16 @@ def _check_result(
     fast path first, falling back to the plain check) using only the
     public per-task API — matches the numbers AgentDojo itself reports."""
     if isinstance(task, BaseUserTask):
-        from_traces = task.utility_from_traces(output_text, pre_environment, post_environment, function_calls)
+        from_traces = task.utility_from_traces(
+            output_text, pre_environment, post_environment, function_calls
+        )
         if from_traces is not None:
             return from_traces
         return task.utility(output_text, pre_environment, post_environment)
 
-    from_traces = task.security_from_traces(output_text, pre_environment, post_environment, function_calls)
+    from_traces = task.security_from_traces(
+        output_text, pre_environment, post_environment, function_calls
+    )
     if from_traces is not None:
         return from_traces
     return task.security(output_text, pre_environment, post_environment)
@@ -361,7 +395,9 @@ def _guarded_verdict(
 
     def run_masked() -> MelonVerdict:
         masked_element = melon_llm_element or llm_element
-        agent_call_fn = _make_agent_call_fn(masked_element, suite, environment.model_copy(deep=True))
+        agent_call_fn = _make_agent_call_fn(
+            masked_element, suite, environment.model_copy(deep=True)
+        )
         return run_melon_check(
             original_calls,
             tool_output_text=tool_output_text,
@@ -378,8 +414,11 @@ def _guarded_verdict(
 
     def align(call: ToolCall):
         return check_alignment(
-            user_task.PROMPT, call.name, call.arguments,
-            source_regions_for_call(call.arguments, regions), judge_fn,
+            user_task.PROMPT,
+            call.name,
+            call.arguments,
+            source_regions_for_call(call.arguments, regions),
+            judge_fn,
         )
 
     with ThreadPoolExecutor(max_workers=2 + len(original_calls)) as pool:
@@ -392,7 +431,9 @@ def _guarded_verdict(
             trusted_authors=trusted,
         )
         result = check_calls(
-            step, screened, original_calls,
+            step,
+            screened,
+            original_calls,
             escalate_fn=lambda calls: speculative.result(),
             alignment_judge_fn=judge_fn,
             alignment_results=[f.result() for f in alignments],
@@ -430,11 +471,22 @@ def run_benign_case(
     )
 
     step = _guarded_verdict(
-        llm_element, melon_llm_element, suite, environment, user_task, messages,
-        original_calls, judge_fn, threshold, masking_prompts=masking_prompts,
+        llm_element,
+        melon_llm_element,
+        suite,
+        environment,
+        user_task,
+        messages,
+        original_calls,
+        judge_fn,
+        threshold,
+        masking_prompts=masking_prompts,
     )
     return CaseResult(
-        user_task.ID, None, None, step.melon_verdict or _not_escalated(original_calls),
+        user_task.ID,
+        None,
+        None,
+        step.melon_verdict or _not_escalated(original_calls),
         user_task_succeeded=user_task_succeeded,
         policy_verdict=step.trace.policy_verdict,
         final_action=step.trace.final_action,
@@ -461,26 +513,48 @@ def run_attack_case(
     pre_environment = environment.model_copy(deep=True)
     runtime = FunctionsRuntime(suite.tools)
 
-    _, _, post_environment, messages, _ = pipeline.query(user_task.PROMPT, runtime, environment.model_copy(deep=True))
-    original_output = get_text_content_as_str(model_output_from_messages(messages) or [])
+    _, _, post_environment, messages, _ = pipeline.query(
+        user_task.PROMPT, runtime, environment.model_copy(deep=True)
+    )
+    original_output = get_text_content_as_str(
+        model_output_from_messages(messages) or []
+    )
     full_function_calls = functions_stack_trace_from_messages(messages)
     # Every sensitive call across the whole episode, not just the last
     # round -- see run_benign_case for why.
     original_calls = _to_tool_calls(full_function_calls)
 
     ground_truth_attack_succeeded = _check_result(
-        injection_task, original_output, pre_environment, post_environment, full_function_calls
+        injection_task,
+        original_output,
+        pre_environment,
+        post_environment,
+        full_function_calls,
     )
     user_task_succeeded = _check_result(
-        user_task, original_output, pre_environment, post_environment, full_function_calls
+        user_task,
+        original_output,
+        pre_environment,
+        post_environment,
+        full_function_calls,
     )
 
     step = _guarded_verdict(
-        llm_element, melon_llm_element, suite, environment, user_task, messages,
-        original_calls, judge_fn, threshold, masking_prompts=masking_prompts,
+        llm_element,
+        melon_llm_element,
+        suite,
+        environment,
+        user_task,
+        messages,
+        original_calls,
+        judge_fn,
+        threshold,
+        masking_prompts=masking_prompts,
     )
     return CaseResult(
-        user_task.ID, injection_task_id, ground_truth_attack_succeeded,
+        user_task.ID,
+        injection_task_id,
+        ground_truth_attack_succeeded,
         step.melon_verdict or _not_escalated(original_calls),
         user_task_succeeded=user_task_succeeded,
         policy_verdict=step.trace.policy_verdict,
@@ -494,7 +568,10 @@ def _not_escalated(original_calls: list[ToolCall]) -> MelonVerdict:
     """Placeholder verdict for a step the policy check settled on its own —
     the counterfactual test never ran, which is the intended fast path."""
     return MelonVerdict(
-        ran=False, verdict=None, distance=None, original_calls=original_calls,
+        ran=False,
+        verdict=None,
+        distance=None,
+        original_calls=original_calls,
         explanation="Resolved at the policy check; the counterfactual test was not needed.",
     )
 
@@ -524,7 +601,9 @@ def run_suite_subset(
     pipeline, llm_element = build_pipeline(provider, model_id)
     attack = load_attack(attack_name, suite, pipeline)
     judge_fn = build_judge(provider, judge_model)
-    melon_llm_element = build_llm_element(provider, melon_model) if melon_model else None
+    melon_llm_element = (
+        build_llm_element(provider, melon_model) if melon_model else None
+    )
 
     user_task_ids = list(suite.user_tasks.keys())[:max_user_tasks]
     injection_task_ids = list(suite.injection_tasks.keys())[:max_injection_tasks]
@@ -532,12 +611,30 @@ def run_suite_subset(
 
     for user_task_id in user_task_ids:
         user_task = suite.get_user_task_by_id(user_task_id)
-        results.append(run_benign_case(pipeline, llm_element, suite, user_task, judge_fn, threshold, masking_prompts, melon_llm_element))
+        results.append(
+            run_benign_case(
+                pipeline,
+                llm_element,
+                suite,
+                user_task,
+                judge_fn,
+                threshold,
+                masking_prompts,
+                melon_llm_element,
+            )
+        )
         for injection_task_id in injection_task_ids:
             results.append(
                 run_attack_case(
-                    pipeline, llm_element, suite, user_task, attack,
-                    injection_task_id, judge_fn, threshold, masking_prompts,
+                    pipeline,
+                    llm_element,
+                    suite,
+                    user_task,
+                    attack,
+                    injection_task_id,
+                    judge_fn,
+                    threshold,
+                    masking_prompts,
                     melon_llm_element,
                 )
             )
@@ -557,7 +654,9 @@ def build_judge(provider: str, judge_model: str | None = None):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run a capped AgentDojo subset through the MELON check.")
+    parser = argparse.ArgumentParser(
+        description="Run a capped AgentDojo subset through the MELON check."
+    )
     parser.add_argument("--provider", choices=["openai", "anthropic"], required=True)
     parser.add_argument("--suite", default="workspace")
     parser.add_argument("--benchmark-version", default="v1.2.2")
@@ -567,15 +666,19 @@ if __name__ == "__main__":
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--judge-model", default=None)
     parser.add_argument(
-        "--melon-model", default=None,
+        "--melon-model",
+        default=None,
         help="Model for the masked re-execution. Defaults to the agent model. Every remaining miss is a masked run that made no tool call, so a stronger model here is the direct lever on the miss rate.",
     )
-    parser.add_argument("--trace-out", default=None, help="Write per-step traces as JSON Lines.")
     parser.add_argument(
-        "--ensemble", default="summarize",
+        "--trace-out", default=None, help="Write per-step traces as JSON Lines."
+    )
+    parser.add_argument(
+        "--ensemble",
+        default="summarize",
         help="Comma-separated masking prompts for the counterfactual test "
-             "(summarize,sentiment,grammar,translate). More detectors cost one "
-             "extra model call each per escalated step and lower the miss rate.",
+        "(summarize,sentiment,grammar,translate). More detectors cost one "
+        "extra model call each per escalated step and lower the miss rate.",
     )
     args = parser.parse_args()
 
@@ -607,12 +710,17 @@ if __name__ == "__main__":
         with open(args.trace_out, "w", encoding="utf-8") as handle:
             for result in case_results:
                 if result.trace is not None:
-                    handle.write(_json.dumps({
-                        **result.trace,
-                        "case": result.user_task_id,
-                        "injection": result.injection_task_id,
-                        "timings": result.timings,
-                    }) + "\n")
+                    handle.write(
+                        _json.dumps(
+                            {
+                                **result.trace,
+                                "case": result.user_task_id,
+                                "injection": result.injection_task_id,
+                                "timings": result.timings,
+                            }
+                        )
+                        + "\n"
+                    )
         print(f"\ntraces written to {args.trace_out}")
 
     # Imported here, not at module level: eval.metrics imports CaseResult
@@ -633,19 +741,31 @@ if __name__ == "__main__":
     print(f"benign utility (defended):     {pct(report.defended_benign_utility)}")
     print(f"utility under attack (undef.): {pct(report.utility_under_attack)}")
     print(f"utility under attack (def.):   {pct(report.defended_utility_under_attack)}")
-    print(f"attacks actually succeeded: {report.attacks_actually_succeeded} of {report.attack_cases}")
-    print(f"attack prevention rate:     {pct(report.attack_prevention_rate, 'n/a (no successful attacks)')}")
-    print(f"false positive rate:        {pct(report.false_positive_rate, 'n/a (no benign cases)')}")
+    print(
+        f"attacks actually succeeded: {report.attacks_actually_succeeded} of {report.attack_cases}"
+    )
+    print(
+        f"attack prevention rate:     {pct(report.attack_prevention_rate, 'n/a (no successful attacks)')}"
+    )
+    print(
+        f"false positive rate:        {pct(report.false_positive_rate, 'n/a (no benign cases)')}"
+    )
     print()
     print("--- the tiering (this project's claim) ---")
     print(f"escalation rate:            {pct(report.escalation_rate)}")
-    print(f"auto-resolution rate:       {pct(report.auto_resolution_rate, 'n/a (nothing escalated)')}")
-    print(f"auto-resolution accuracy:   {pct(report.auto_resolution_accuracy, 'n/a (no ground truth)')}")
+    print(
+        f"auto-resolution rate:       {pct(report.auto_resolution_rate, 'n/a (nothing escalated)')}"
+    )
+    print(
+        f"auto-resolution accuracy:   {pct(report.auto_resolution_accuracy, 'n/a (no ground truth)')}"
+    )
     print()
     print("--- headline: confirmations vs RTBAS alone ---")
     print(f"RTBAS alone would ask:      {report.rtbas_baseline_confirmations}")
     print(f"we ask:                     {report.human_confirmations}")
-    print(f"confirmation reduction:     {pct(report.confirmation_reduction, 'n/a (nothing escalated)')}")
+    print(
+        f"confirmation reduction:     {pct(report.confirmation_reduction, 'n/a (nothing escalated)')}"
+    )
 
     def ms(value):
         return f"{value:.0f} ms" if value is not None else "n/a"

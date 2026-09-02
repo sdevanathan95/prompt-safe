@@ -212,7 +212,9 @@ def build_masked_messages(
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"function": "read_file", "arguments": {"name": "random.txt"}}],
+            "tool_calls": [
+                {"function": "read_file", "arguments": {"name": "random.txt"}}
+            ],
         }
     )
     messages.append({"role": "tool", "content": tool_output_text})

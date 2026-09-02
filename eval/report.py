@@ -45,14 +45,16 @@ def response_only_injections(suite_name: str, version: str = "v1.2.2") -> set[st
 
         suite = get_suite(version, suite_name)
         environment = suite.load_and_inject_default_environment({})
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort against a versioned external library
         return set()
 
     response_only = set()
     for task_id in suite.injection_tasks:
         try:
-            ground_truth = suite.get_injection_task_by_id(task_id).ground_truth(environment)
-        except Exception:
+            ground_truth = suite.get_injection_task_by_id(task_id).ground_truth(
+                environment
+            )
+        except Exception:  # noqa: BLE001, S112 - one bad task shouldn't sink the whole report
             continue
         if ground_truth is not None and len(ground_truth) == 0:
             response_only.add(task_id)
@@ -118,7 +120,9 @@ def parse(path: Path) -> list[Case]:
     return cases
 
 
-def summarize(cases: list[Case], label: str, out_of_scope: set[tuple[str, str]] | None = None) -> str:
+def summarize(
+    cases: list[Case], label: str, out_of_scope: set[tuple[str, str]] | None = None
+) -> str:
     out_of_scope = out_of_scope or set()
     cases = [c for c in cases if (c.suite, c.injection) not in out_of_scope]
     benign = [c for c in cases if not c.is_attack]
@@ -153,9 +157,7 @@ def main(paths: list[str]) -> None:
 
     suites = sorted({c.suite for c in everything})
     out_of_scope = {
-        (suite, task)
-        for suite in suites
-        for task in response_only_injections(suite)
+        (suite, task) for suite in suites for task in response_only_injections(suite)
     }
 
     print("TOOL-MEDIATED ATTACKS — what a tool-call defense can see")
@@ -179,11 +181,15 @@ def main(paths: list[str]) -> None:
         )
 
     in_scope = [c for c in everything if (c.suite, c.injection) not in out_of_scope]
-    missed = [c for c in in_scope if c.is_attack and c.attack_succeeded and not c.stopped]
+    missed = [
+        c for c in in_scope if c.is_attack and c.attack_succeeded and not c.stopped
+    ]
     if missed:
         print(f"\nin-scope attacks that passed through ({len(missed)}):")
         for c in missed:
-            print(f"  {c.suite:<10} {c.user_task} / {c.injection}  policy={c.policy} action={c.action}")
+            print(
+                f"  {c.suite:<10} {c.user_task} / {c.injection}  policy={c.policy} action={c.action}"
+            )
 
 
 if __name__ == "__main__":

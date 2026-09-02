@@ -110,8 +110,11 @@ def compare(
 
     if not original_calls:
         return MelonVerdict(
-            ran=True, verdict="safe", distance=None,
-            original_calls=original_calls, masked_calls=masked_calls,
+            ran=True,
+            verdict="safe",
+            distance=None,
+            original_calls=original_calls,
+            masked_calls=masked_calls,
             explanation="No tool calls were made in the original run — nothing to test.",
         )
 
@@ -121,8 +124,11 @@ def compare(
     sensitive_calls = [call for call in original_calls if is_sensitive(call)]
     if not sensitive_calls:
         return MelonVerdict(
-            ran=True, verdict="safe", distance=None,
-            original_calls=original_calls, masked_calls=masked_calls,
+            ran=True,
+            verdict="safe",
+            distance=None,
+            original_calls=original_calls,
+            masked_calls=masked_calls,
             explanation=(
                 "No call in the original run touches a sensitive action, so "
                 "convergence could not cause harm either way."
@@ -131,8 +137,11 @@ def compare(
 
     if not masked_calls:
         return MelonVerdict(
-            ran=True, verdict="safe", distance=1.0,
-            original_calls=original_calls, masked_calls=masked_calls,
+            ran=True,
+            verdict="safe",
+            distance=1.0,
+            original_calls=original_calls,
+            masked_calls=masked_calls,
             explanation=(
                 "With the user's task removed the agent made no tool calls at "
                 "all, so the action it took in the real run was driven by the "
@@ -140,7 +149,9 @@ def compare(
             ),
         )
 
-    similarity, original_match, masked_match = most_similar_pair(sensitive_calls, masked_calls)
+    similarity, original_match, masked_match = most_similar_pair(
+        sensitive_calls, masked_calls
+    )
     # Clamped: float error on identical vectors otherwise reports a
     # negative distance, which reads as a bug in any trace that shows it.
     similarity = min(1.0, max(0.0, similarity))
@@ -166,7 +177,10 @@ def compare(
         )
 
     return MelonVerdict(
-        ran=True, verdict=verdict, distance=distance,
-        original_calls=original_calls, masked_calls=masked_calls,
+        ran=True,
+        verdict=verdict,
+        distance=distance,
+        original_calls=original_calls,
+        masked_calls=masked_calls,
         explanation=explanation,
     )

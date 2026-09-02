@@ -14,7 +14,11 @@ from eval.harness import _observations_before_final_decision
 
 
 def _tool(name, content):
-    return {"role": "tool", "content": content, "tool_call": type("C", (), {"function": name})()}
+    return {
+        "role": "tool",
+        "content": content,
+        "tool_call": type("C", (), {"function": name})(),
+    }
 
 
 def _assistant(*, calls):
@@ -27,14 +31,16 @@ def test_the_decision_under_test_and_its_result_are_excluded():
         {"role": "user", "content": "task"},
         _assistant(calls=["read"]),
         _tool("get_most_recent_transactions", "history"),
-        _assistant(calls=["send"]),          # <- the decision being tested
+        _assistant(calls=["send"]),  # <- the decision being tested
         _tool("send_money", "transfer done"),  # <- its own aftermath
     ]
     kept = _observations_before_final_decision(messages)
 
     names = [m["tool_call"].function for m in kept if m["role"] == "tool"]
     assert names == ["get_most_recent_transactions"]
-    assert not any(m["role"] == "tool" and m["tool_call"].function == "send_money" for m in kept)
+    assert not any(
+        m["role"] == "tool" and m["tool_call"].function == "send_money" for m in kept
+    )
 
 
 def test_earlier_decisions_and_their_results_are_kept():
@@ -48,7 +54,11 @@ def test_earlier_decisions_and_their_results_are_kept():
         _assistant(calls=["c"]),
         _tool("send_money", "done"),
     ]
-    names = [m["tool_call"].function for m in _observations_before_final_decision(messages) if m["role"] == "tool"]
+    names = [
+        m["tool_call"].function
+        for m in _observations_before_final_decision(messages)
+        if m["role"] == "tool"
+    ]
     assert names == ["read_file", "get_balance"]
 
 

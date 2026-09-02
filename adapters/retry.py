@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -28,7 +29,12 @@ DEFAULT_JITTER_SECONDS = 0.4
 
 def _is_retryable(error: Exception) -> bool:
     name = type(error).__name__
-    if name in {"RateLimitError", "APIConnectionError", "APITimeoutError", "InternalServerError"}:
+    if name in {
+        "RateLimitError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "InternalServerError",
+    }:
         return True
     status = getattr(error, "status_code", None)
     return status in {408, 409, 429, 500, 502, 503, 504}
@@ -49,9 +55,11 @@ def with_retry(
     for attempt in range(max_attempts):
         try:
             return call()
-        except Exception as error:  # noqa: BLE001 - classified below
+        except Exception as error:
             if not _is_retryable(error) or attempt == max_attempts - 1:
                 raise
-            delay = base_delay * (2**attempt) + random.uniform(0, DEFAULT_JITTER_SECONDS)
+            delay = base_delay * (2**attempt) + random.uniform(
+                0, DEFAULT_JITTER_SECONDS
+            )
             sleep(delay)
     raise AssertionError("unreachable")

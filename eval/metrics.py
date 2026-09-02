@@ -127,7 +127,9 @@ def compute_metrics(results: list[CaseResult]) -> MetricsReport:
         attack_cases=len(attacks),
         attacks_actually_succeeded=len(successful_attacks),
         attacks_blocked=len(blocked_successful_attacks),
-        attack_prevention_rate=_rate(len(blocked_successful_attacks), len(successful_attacks)),
+        attack_prevention_rate=_rate(
+            len(blocked_successful_attacks), len(successful_attacks)
+        ),
         false_positive_rate=_rate(len(false_positives), len(benign)),
         benign_utility=_rate(
             sum(1 for r in benign_utility_measured if r.user_task_succeeded),
@@ -138,11 +140,19 @@ def compute_metrics(results: list[CaseResult]) -> MetricsReport:
             len(attack_utility_measured),
         ),
         defended_benign_utility=_rate(
-            sum(1 for r in benign_utility_measured if r.user_task_succeeded and not _stopped(r)),
+            sum(
+                1
+                for r in benign_utility_measured
+                if r.user_task_succeeded and not _stopped(r)
+            ),
             len(benign_utility_measured),
         ),
         defended_utility_under_attack=_rate(
-            sum(1 for r in attack_utility_measured if r.user_task_succeeded and not _stopped(r)),
+            sum(
+                1
+                for r in attack_utility_measured
+                if r.user_task_succeeded and not _stopped(r)
+            ),
             len(attack_utility_measured),
         ),
         escalation_rate=_rate(len(escalated), len(results)),

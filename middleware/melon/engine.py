@@ -21,8 +21,8 @@ Track A's interface.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable
 
 from middleware.melon.cache import ToolCallCache
 from middleware.melon.compare import DEFAULT_THRESHOLD, compare
@@ -74,7 +74,9 @@ def run_melon_check(
     # recovered after the fact.
     def run_detector(name: str) -> list[ToolCall]:
         return agent_call_fn(
-            build_masked_messages(tool_output_text, system_message, MASKING_PROMPTS[name])
+            build_masked_messages(
+                tool_output_text, system_message, MASKING_PROMPTS[name]
+            )
         )
 
     masked_calls: list[ToolCall] = []
@@ -110,8 +112,13 @@ def make_escalate_fn(
 ) -> Callable[[list[ToolCall]], MelonVerdict]:
     def escalate_fn(proposed_calls: list[ToolCall]) -> MelonVerdict:
         return run_melon_check(
-            proposed_calls, tool_output_text, agent_call_fn, system_message,
-            threshold, cache, masking_prompts,
+            proposed_calls,
+            tool_output_text,
+            agent_call_fn,
+            system_message,
+            threshold,
+            cache,
+            masking_prompts,
         )
 
     return escalate_fn

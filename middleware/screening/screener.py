@@ -19,8 +19,8 @@ context.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from middleware.screening.labels import Label
 from middleware.screening.regions import Region, dependency_label, render_tagged
@@ -33,9 +33,7 @@ JudgeFn = Callable[[list[dict], dict], dict]
 
 SCREENER_TOOL_SCHEMA = {
     "name": "report_relevant_regions",
-    "description": (
-        "Report which regions the assistant's next decision depends on."
-    ),
+    "description": ("Report which regions the assistant's next decision depends on."),
     "parameters": {
         "type": "object",
         "properties": {
@@ -152,7 +150,11 @@ def screen(
 
     relevant_ids = arguments.get("relevant_region_ids")
     if not isinstance(relevant_ids, list):
-        raise ValueError(
+        # ValueError, not TypeError (TRY004): this is a malformed runtime
+        # result from the judge model, not a caller passing the wrong
+        # argument type -- ValueError is the correct category and
+        # test_malformed_judge_output_raises already asserts on it.
+        raise ValueError(  # noqa: TRY004
             "Screener returned no usable relevant_region_ids: "
             f"{arguments!r}. The forced tool call exists to make this "
             "impossible — a malformed result is a bug, not a screening outcome."

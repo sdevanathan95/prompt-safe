@@ -15,11 +15,18 @@ from middleware.melon.types import MelonVerdict
 
 
 def case(
-    task="t1", injection=None, attack_succeeded=None, task_succeeded=None,
-    policy=None, action=None, melon="safe",
+    task="t1",
+    injection=None,
+    attack_succeeded=None,
+    task_succeeded=None,
+    policy=None,
+    action=None,
+    melon="safe",
 ) -> CaseResult:
     return CaseResult(
-        task, injection, attack_succeeded,
+        task,
+        injection,
+        attack_succeeded,
         MelonVerdict(ran=melon is not None, verdict=melon, distance=0.0),
         user_task_succeeded=task_succeeded,
         policy_verdict=policy,
@@ -54,8 +61,15 @@ def test_ask_user_counts_as_stopped_but_is_tracked_separately():
     """A confirmation prompt does stop the call, but it is the cost this
     project exists to reduce, so it cannot silently count as a clean win."""
     results = [
-        case(injection="inj1", attack_succeeded=True, policy="escalate", action="ask_user"),
-        case(injection="inj1", attack_succeeded=True, policy="escalate", action="block"),
+        case(
+            injection="inj1",
+            attack_succeeded=True,
+            policy="escalate",
+            action="ask_user",
+        ),
+        case(
+            injection="inj1", attack_succeeded=True, policy="escalate", action="block"
+        ),
     ]
     report = compute_metrics(results)
 
@@ -66,9 +80,21 @@ def test_ask_user_counts_as_stopped_but_is_tracked_separately():
 def test_escalation_and_auto_resolution_accounting():
     results = [
         case(policy="safe", action="execute"),
-        case(injection="inj1", attack_succeeded=True, policy="escalate", action="block"),
-        case(injection="inj2", attack_succeeded=False, policy="escalate", action="execute"),
-        case(injection="inj3", attack_succeeded=True, policy="escalate", action="ask_user"),
+        case(
+            injection="inj1", attack_succeeded=True, policy="escalate", action="block"
+        ),
+        case(
+            injection="inj2",
+            attack_succeeded=False,
+            policy="escalate",
+            action="execute",
+        ),
+        case(
+            injection="inj3",
+            attack_succeeded=True,
+            policy="escalate",
+            action="ask_user",
+        ),
     ]
     report = compute_metrics(results)
 
@@ -82,8 +108,12 @@ def test_escalation_and_auto_resolution_accounting():
 def test_auto_resolution_accuracy_catches_confident_wrong_answers():
     """Resolution rate without accuracy only measures willingness to guess."""
     results = [
-        case(injection="inj1", attack_succeeded=True, policy="escalate", action="execute"),
-        case(injection="inj2", attack_succeeded=False, policy="escalate", action="block"),
+        case(
+            injection="inj1", attack_succeeded=True, policy="escalate", action="execute"
+        ),
+        case(
+            injection="inj2", attack_succeeded=False, policy="escalate", action="block"
+        ),
     ]
     report = compute_metrics(results)
 
@@ -123,14 +153,28 @@ def test_defended_utility_subtracts_what_the_defense_stopped():
 def test_a_confirmation_prompt_also_costs_utility():
     """ask_user stops the call just as block does, so it cannot be scored as
     a task the defended system completed."""
-    results = [case(injection=None, task_succeeded=True, policy="escalate", action="ask_user")]
+    results = [
+        case(injection=None, task_succeeded=True, policy="escalate", action="ask_user")
+    ]
     assert compute_metrics(results).defended_benign_utility == 0.0
 
 
 def test_defended_utility_under_attack_is_tracked_separately():
     results = [
-        case(injection="i1", attack_succeeded=True, task_succeeded=True, policy="escalate", action="block"),
-        case(injection="i2", attack_succeeded=False, task_succeeded=True, policy="safe", action="execute"),
+        case(
+            injection="i1",
+            attack_succeeded=True,
+            task_succeeded=True,
+            policy="escalate",
+            action="block",
+        ),
+        case(
+            injection="i2",
+            attack_succeeded=False,
+            task_succeeded=True,
+            policy="safe",
+            action="execute",
+        ),
     ]
     report = compute_metrics(results)
 
@@ -166,9 +210,19 @@ def test_latency_separates_the_always_on_stage_from_the_rare_one():
     """The cost argument is that stage 3 is expensive but rare, so the average
     turn costs far less than an escalated one. One blended number hides that."""
     cheap = case(policy="safe", action="execute")
-    cheap.timings = {"screen_ms": 100.0, "policy_ms": 2.0, "melon_ms": 0.0, "total_ms": 102.0}
+    cheap.timings = {
+        "screen_ms": 100.0,
+        "policy_ms": 2.0,
+        "melon_ms": 0.0,
+        "total_ms": 102.0,
+    }
     costly = case(policy="escalate", action="block")
-    costly.timings = {"screen_ms": 100.0, "policy_ms": 2.0, "melon_ms": 900.0, "total_ms": 1002.0}
+    costly.timings = {
+        "screen_ms": 100.0,
+        "policy_ms": 2.0,
+        "melon_ms": 900.0,
+        "total_ms": 1002.0,
+    }
 
     report = compute_metrics([cheap, costly])
 

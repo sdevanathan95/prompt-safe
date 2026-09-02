@@ -33,7 +33,12 @@ def test_make_escalate_fn_resolves_a_real_escalation_via_guard():
 
     escalate_fn = make_escalate_fn(tool_output_text, fake_agent_call_fn)
 
-    result = check_calls(step=1, screened=screened, proposed_calls=proposed_calls, escalate_fn=escalate_fn)
+    result = check_calls(
+        step=1,
+        screened=screened,
+        proposed_calls=proposed_calls,
+        escalate_fn=escalate_fn,
+    )
 
     assert result.trace.policy_verdict == "escalate"
     assert result.melon_verdict is not None
@@ -50,7 +55,9 @@ def test_no_escalate_fn_falls_back_to_ask_user():
     )
     proposed_calls = [ToolCall(name="delete_file", arguments={"name": "important.txt"})]
 
-    result = check_calls(step=1, screened=screened, proposed_calls=proposed_calls, escalate_fn=None)
+    result = check_calls(
+        step=1, screened=screened, proposed_calls=proposed_calls, escalate_fn=None
+    )
 
     assert result.trace.policy_verdict == "escalate"
     assert result.melon_verdict is None

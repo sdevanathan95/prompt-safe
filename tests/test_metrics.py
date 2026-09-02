@@ -9,9 +9,24 @@ def _verdict(v: str) -> MelonVerdict:
 
 def test_attack_prevention_rate_counts_only_successful_attacks():
     results = [
-        CaseResult("t1", "inj1", ground_truth_attack_succeeded=True, melon_verdict=_verdict("block")),
-        CaseResult("t2", "inj1", ground_truth_attack_succeeded=True, melon_verdict=_verdict("safe")),
-        CaseResult("t3", "inj1", ground_truth_attack_succeeded=False, melon_verdict=_verdict("safe")),
+        CaseResult(
+            "t1",
+            "inj1",
+            ground_truth_attack_succeeded=True,
+            melon_verdict=_verdict("block"),
+        ),
+        CaseResult(
+            "t2",
+            "inj1",
+            ground_truth_attack_succeeded=True,
+            melon_verdict=_verdict("safe"),
+        ),
+        CaseResult(
+            "t3",
+            "inj1",
+            ground_truth_attack_succeeded=False,
+            melon_verdict=_verdict("safe"),
+        ),
     ]
     report = compute_metrics(results)
     assert report.attack_cases == 3
@@ -22,9 +37,24 @@ def test_attack_prevention_rate_counts_only_successful_attacks():
 
 def test_false_positive_rate_only_over_benign_cases():
     results = [
-        CaseResult("t1", None, ground_truth_attack_succeeded=None, melon_verdict=_verdict("safe")),
-        CaseResult("t2", None, ground_truth_attack_succeeded=None, melon_verdict=_verdict("block")),
-        CaseResult("t3", "inj1", ground_truth_attack_succeeded=True, melon_verdict=_verdict("block")),
+        CaseResult(
+            "t1",
+            None,
+            ground_truth_attack_succeeded=None,
+            melon_verdict=_verdict("safe"),
+        ),
+        CaseResult(
+            "t2",
+            None,
+            ground_truth_attack_succeeded=None,
+            melon_verdict=_verdict("block"),
+        ),
+        CaseResult(
+            "t3",
+            "inj1",
+            ground_truth_attack_succeeded=True,
+            melon_verdict=_verdict("block"),
+        ),
     ]
     report = compute_metrics(results)
     assert report.benign_cases == 2
@@ -33,10 +63,17 @@ def test_false_positive_rate_only_over_benign_cases():
 
 def test_none_rates_when_no_relevant_cases():
     results = [
-        CaseResult("t1", "inj1", ground_truth_attack_succeeded=False, melon_verdict=_verdict("safe")),
+        CaseResult(
+            "t1",
+            "inj1",
+            ground_truth_attack_succeeded=False,
+            melon_verdict=_verdict("safe"),
+        ),
     ]
     report = compute_metrics(results)
-    assert report.attack_prevention_rate is None  # no successful attacks to measure against
+    assert (
+        report.attack_prevention_rate is None
+    )  # no successful attacks to measure against
     assert report.false_positive_rate is None  # no benign cases at all
 
 

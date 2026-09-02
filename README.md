@@ -82,13 +82,16 @@ from adapters.judge import openai_judge
 
 session = Session("Summarize anything urgent in my inbox.", judge_fn=openai_judge())
 
+
 @session.protect
 def read_email():
     return fetch_inbox()  # tool bodies are your own — wrap what you already have
 
+
 @session.protect
 def send_email(to, body):
     return smtp_client.send(to, body)
+
 
 read_email()
 try:
@@ -108,9 +111,10 @@ happens rather than when the function is defined:
 ```python
 from middleware.screening.live import guard, session_scope
 
+
 @guard(policy="default")
-def send_email(to, subject, body):
-    ...
+def send_email(to, subject, body): ...
+
 
 with session_scope(Session(user_task, judge_fn=openai_judge())):
     agent.run()
@@ -123,6 +127,7 @@ than running it unguarded.
 
 ```python
 from adapters.langgraph import protect_tools
+
 graph.add_node("tools", ToolNode(protect_tools(session, my_tools)))
 ```
 
@@ -139,8 +144,9 @@ already generated its decision. So the caller pulls the redacted history when
 building the next prompt:
 
 ```python
-session = Session(task, judge_fn=openai_judge(),
-                  trusted_authors=frozenset({"company.com"}))
+session = Session(
+    task, judge_fn=openai_judge(), trusted_authors=frozenset({"company.com"})
+)
 session.observe("read_email", inbox)
 
 prompt_context = session.redacted_context()

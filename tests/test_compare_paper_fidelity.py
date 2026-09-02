@@ -28,7 +28,11 @@ def test_render_drops_free_text_for_security_sensitive_functions():
     dominate the vector and hide the recipient that actually matters."""
     call = ToolCall(
         "send_email",
-        {"recipients": "hacker@mail.com", "subject": "private", "body": "my password is abc"},
+        {
+            "recipients": "hacker@mail.com",
+            "subject": "private",
+            "body": "my password is abc",
+        },
     )
     assert render_call(call) == "send_email(recipients = hacker@mail.com)"
     assert "password" not in render_call(call)
@@ -71,7 +75,9 @@ def test_identical_sensitive_calls_converge_and_block():
 
 def test_a_masked_run_that_did_nothing_is_maximum_divergence():
     """The benign shape: no user task, so no action at all."""
-    verdict = compare([ToolCall("send_money", {"recipient": "landlord", "amount": 100})], [])
+    verdict = compare(
+        [ToolCall("send_money", {"recipient": "landlord", "amount": 100})], []
+    )
 
     assert verdict.verdict == "safe"
     assert verdict.distance == 1.0

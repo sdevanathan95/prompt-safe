@@ -15,20 +15,20 @@ knowing when reading numbers produced that way.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable
 
 from middleware.melon.types import MelonVerdict, ToolCall
 from middleware.screening import policy
-from middleware.screening.labels import Label
-from middleware.screening.redactor import RedactionResult, redact
 from middleware.screening.alignment import check_alignment
+from middleware.screening.labels import Label
 from middleware.screening.provenance import (
     call_label,
     explain_call_label,
     source_regions_for_call,
 )
+from middleware.screening.redactor import RedactionResult, redact
 from middleware.screening.regions import Region, build_regions, labels_by_id
 from middleware.screening.screener import JudgeFn, ScreenResult, screen
 from middleware.trace.schema import FinalAction, ScreenedRegions, StepTrace
@@ -104,7 +104,9 @@ def screen_step(
     regions = build_regions(
         tool_outputs, start_index=start_index, trusted_authors=trusted_authors
     )
-    screen_result = _screen_if_it_can_change_anything(regions, task_description, judge_fn)
+    screen_result = _screen_if_it_can_change_anything(
+        regions, task_description, judge_fn
+    )
     redaction = redact(regions, screen_result.label)
     return ScreenedStep(
         regions=regions,
@@ -168,7 +170,9 @@ def check_calls(
     # escalation costs a second model call.
     policy_started = time.perf_counter()
     call_labels = [
-        call_label(call.arguments, screened.regions, screened.task_description, screened.label)
+        call_label(
+            call.arguments, screened.regions, screened.task_description, screened.label
+        )
         for call in proposed_calls
     ]
     decisions = [
@@ -196,6 +200,7 @@ def check_calls(
             for call, decision in zip(proposed_calls, decisions)
             if decision.verdict == "escalate"
         ]
+
         def aligned(call: ToolCall):
             return check_alignment(
                 screened.task_description,
@@ -244,8 +249,12 @@ def check_calls(
                 f"action is what it asks for. {alignment.reasoning}"
             )
         else:
-            explanation = driving.explanation if driving else (
-                "This step proposed no tool calls, so there was nothing to check."
+            explanation = (
+                driving.explanation
+                if driving
+                else (
+                    "This step proposed no tool calls, so there was nothing to check."
+                )
             )
     elif verdict == "block":
         final_action = "block"
@@ -270,7 +279,9 @@ def check_calls(
     trace = StepTrace(
         step=step,
         context_label=driving_label.to_dict(),
-        policy_label=(driving.policy_label.to_dict() if driving else screened.label.to_dict()),
+        policy_label=(
+            driving.policy_label.to_dict() if driving else screened.label.to_dict()
+        ),
         screened_regions=ScreenedRegions(
             relevant=list(screened.screen_result.relevant_ids),
             masked=list(screened.redaction.masked_ids),

@@ -16,7 +16,13 @@ import html
 import json
 from pathlib import Path
 
-_VERDICT_CLASS = {"safe": "ok", "execute": "ok", "escalate": "warn", "block": "bad", "ask_user": "warn"}
+_VERDICT_CLASS = {
+    "safe": "ok",
+    "execute": "ok",
+    "escalate": "warn",
+    "block": "bad",
+    "ask_user": "warn",
+}
 
 _CSS = """
 :root { --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
@@ -85,12 +91,14 @@ def _regions_block(screened: dict) -> str:
     for region_id, label in labels.items():
         css = "rel" if region_id in relevant else ("msk" if region_id in masked else "")
         title = f"{region_id}: {_label(label)}"
-        chips.append(f'<span class="r {css}" title="{_esc(title)}">{_esc(region_id)}</span>')
+        chips.append(
+            f'<span class="r {css}" title="{_esc(title)}">{_esc(region_id)}</span>'
+        )
     return (
         f'<div class="regions">{"".join(chips)}</div>'
         f'<p class="legend">{len(labels)} regions · '
-        f'{len(relevant)} load-bearing · {len(masked)} redacted. '
-        f'Hover a region for its label.</p>'
+        f"{len(relevant)} load-bearing · {len(masked)} redacted. "
+        f"Hover a region for its label.</p>"
     )
 
 
@@ -101,17 +109,24 @@ def _melon_block(melon: dict | None) -> str:
             "check settled this step on its own.</p>"
         )
     rows = []
-    for title, calls in (("original run", melon.get("original_calls", [])),
-                         ("masked run", melon.get("masked_calls", []))):
-        rendered = ", ".join(
-            f"<code>{_esc(c['name'])}({', '.join(f'{k}={v!r}' for k, v in c['arguments'].items())})</code>"
-            for c in calls
-        ) or '<span class="legend">no tool calls</span>'
+    for title, calls in (
+        ("original run", melon.get("original_calls", [])),
+        ("masked run", melon.get("masked_calls", [])),
+    ):
+        rendered = (
+            ", ".join(
+                f"<code>{_esc(c['name'])}({', '.join(f'{k}={v!r}' for k, v in c['arguments'].items())})</code>"
+                for c in calls
+            )
+            or '<span class="legend">no tool calls</span>'
+        )
         rows.append(f"<tr><th>{title}</th><td>{rendered}</td></tr>")
     distance = melon.get("distance")
     distance_text = f"{distance:.3f}" if isinstance(distance, (int, float)) else "—"
-    rows.append(f"<tr><th>distance</th><td><code>{distance_text}</code> "
-                f"(converged ⇒ caused by the tool output, not the task)</td></tr>")
+    rows.append(
+        f"<tr><th>distance</th><td><code>{distance_text}</code> "
+        f"(converged ⇒ caused by the tool output, not the task)</td></tr>"
+    )
     return f'<div class="scroll"><table>{"".join(rows)}</table></div>'
 
 
@@ -158,11 +173,17 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Render a trace file as HTML.")
-    parser.add_argument("traces", help="JSON Lines trace file from eval.harness --trace-out")
+    parser.add_argument(
+        "traces", help="JSON Lines trace file from eval.harness --trace-out"
+    )
     parser.add_argument("-o", "--out", default="trace-report.html")
     args = parser.parse_args()
 
-    traces = [json.loads(line) for line in Path(args.traces).read_text().splitlines() if line.strip()]
+    traces = [
+        json.loads(line)
+        for line in Path(args.traces).read_text().splitlines()
+        if line.strip()
+    ]
     Path(args.out).write_text(render(traces), encoding="utf-8")
     print(f"wrote {args.out} ({len(traces)} steps)")
 

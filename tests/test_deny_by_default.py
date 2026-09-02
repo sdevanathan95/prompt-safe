@@ -13,7 +13,7 @@ from middleware.melon.masking import (
 )
 from middleware.melon.types import ToolCall
 from middleware.screening.labels import Confidentiality, Integrity, Label
-from middleware.screening.policy import check, is_read_only, policy_label
+from middleware.screening.policy import check, is_read_only
 
 UNTRUSTED = Label(Integrity.UNTRUSTED, Confidentiality.PUBLIC)
 
@@ -77,7 +77,9 @@ def test_ensemble_members_ask_for_genuinely_different_tasks():
 
 
 def test_selected_masking_prompt_reaches_the_conversation():
-    messages = build_masked_messages("tool output", masking_prompt=MASKING_PROMPTS["translate"])
+    messages = build_masked_messages(
+        "tool output", masking_prompt=MASKING_PROMPTS["translate"]
+    )
     last_user = [m for m in messages if m["role"] == "user"][-1]["content"]
     assert "translate" in last_user.lower()
 
@@ -103,7 +105,9 @@ def test_ensemble_pools_every_detectors_calls():
         return [injected] if len(seen) == 3 else []
 
     verdict = run_melon_check(
-        [injected], "poisoned output", agent_call_fn,
+        [injected],
+        "poisoned output",
+        agent_call_fn,
         masking_prompts=DEFAULT_ENSEMBLE,
     )
 
@@ -135,7 +139,9 @@ def test_ensemble_members_run_concurrently_not_in_sequence():
             live -= 1
         return []
 
-    run_melon_check([injected], "output", agent_call_fn, masking_prompts=DEFAULT_ENSEMBLE)
+    run_melon_check(
+        [injected], "output", agent_call_fn, masking_prompts=DEFAULT_ENSEMBLE
+    )
     assert peak > 1, "ensemble members ran sequentially"
 
 
@@ -144,7 +150,9 @@ def test_a_single_detector_does_not_pay_for_a_thread_pool():
 
     seen = []
     run_melon_check(
-        [ToolCall("send_money", {"amount": 1})], "output",
-        lambda m: seen.append(m) or [], masking_prompts=("summarize",),
+        [ToolCall("send_money", {"amount": 1})],
+        "output",
+        lambda m: seen.append(m) or [],
+        masking_prompts=("summarize",),
     )
     assert len(seen) == 1

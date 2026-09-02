@@ -59,7 +59,10 @@ def test_private_data_may_still_reach_a_non_publishing_sink():
     a private context is not a leak. Collapsing the two sink kinds together
     would block this legitimate call."""
     assert check("send_money", TRUSTED_PRIVATE).verdict == "safe"
-    assert check("send_email", TRUSTED_PRIVATE, enforce_confidentiality=True).verdict == "block"
+    assert (
+        check("send_email", TRUSTED_PRIVATE, enforce_confidentiality=True).verdict
+        == "block"
+    )
 
 
 def test_confidentiality_violation_wins_over_integrity_violation():
@@ -75,8 +78,14 @@ def test_decision_records_both_sides_of_the_comparison():
     could assert a block without being able to explain it."""
     trace = check("send_money", UNTRUSTED_PUBLIC).to_trace_dict()
 
-    assert trace["context_label"] == {"integrity": "untrusted", "confidentiality": "public"}
-    assert trace["policy_label"] == {"integrity": "trusted", "confidentiality": "private"}
+    assert trace["context_label"] == {
+        "integrity": "untrusted",
+        "confidentiality": "public",
+    }
+    assert trace["policy_label"] == {
+        "integrity": "trusted",
+        "confidentiality": "private",
+    }
     assert trace["policy_verdict"] == "escalate"
     assert trace["source_provenance"] == "untrusted"
 

@@ -40,15 +40,17 @@ from middleware.screening.screener import JudgeFn
 # been designated, so the alignment model call cannot clear the step and is
 # pure latency on the path that most needs to be fast.
 _POINTER_PATTERNS = (
-    re.compile(r"\b[\w\-.]+\.(txt|pdf|docx?|xlsx?|csv|md|json|ya?ml|html?)\b", re.I),
-    re.compile(r"https?://\S+|\bwww\.\S+", re.I),
+    re.compile(
+        r"\b[\w\-.]+\.(txt|pdf|docx?|xlsx?|csv|md|json|ya?ml|html?)\b", re.IGNORECASE
+    ),
+    re.compile(r"https?://\S+|\bwww\.\S+", re.IGNORECASE),
     re.compile(r"['\"][^'\"]{3,}['\"]"),
     re.compile(
         r"\b(accord(ing|ingly)|as (stated|listed|described|requested|instructed)|"
         r"listed in|mentioned in|specified in|attached|the (file|document|email|"
         r"message|page|website|link|note|invoice|bill|list)|follow the|"
         r"do (what|the tasks)|instructions? (in|on|from))\b",
-        re.I,
+        re.IGNORECASE,
     ),
 )
 
@@ -146,7 +148,9 @@ def build_alignment_messages(
     """Prompt-sandwiched, same as the screener: instructions in the system
     message and again after the content, so attacker text is never last."""
     rendered_args = ", ".join(f"{k} = {v}" for k, v in arguments.items())
-    sources = "\n\n".join(region.content for region in source_regions) or "(none recorded)"
+    sources = (
+        "\n\n".join(region.content for region in source_regions) or "(none recorded)"
+    )
     return [
         {"role": "system", "content": _SYSTEM_INSTRUCTIONS},
         {
@@ -182,14 +186,18 @@ def check_alignment(
             "nothing in it designates where these values came from.",
         )
 
-    messages = build_alignment_messages(task_description, tool_name, arguments, source_regions)
+    messages = build_alignment_messages(
+        task_description, tool_name, arguments, source_regions
+    )
     try:
         answer = judge_fn(messages, ALIGNMENT_TOOL_SCHEMA)
     except Exception as exc:  # noqa: BLE001 - degrade, never fail open
         return AlignmentResult(False, False, f"Alignment check unavailable: {exc}")
 
     if not isinstance(answer, dict):
-        return AlignmentResult(False, False, "Alignment check returned no usable answer.")
+        return AlignmentResult(
+            False, False, "Alignment check returned no usable answer."
+        )
 
     return AlignmentResult(
         serves_user_task=bool(answer.get("serves_user_task")),

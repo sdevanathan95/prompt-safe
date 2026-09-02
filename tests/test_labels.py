@@ -82,7 +82,10 @@ def test_join_all_of_nothing_is_bottom():
 
 
 def test_join_all_accumulates_across_regions():
-    assert join_all([TRUSTED_PUBLIC, UNTRUSTED_PUBLIC, TRUSTED_PRIVATE]) == UNTRUSTED_PRIVATE
+    assert (
+        join_all([TRUSTED_PUBLIC, UNTRUSTED_PUBLIC, TRUSTED_PRIVATE])
+        == UNTRUSTED_PRIVATE
+    )
 
 
 def test_to_dict_matches_trace_schema_shape():

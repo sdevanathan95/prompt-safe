@@ -19,7 +19,7 @@ ToolNode.
 
 from __future__ import annotations
 
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 from middleware.screening.live import Blocked, NeedsConfirmation, Session
 

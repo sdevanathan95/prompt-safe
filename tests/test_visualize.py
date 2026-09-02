@@ -22,8 +22,12 @@ TRACE = {
     "policy_verdict": "escalate",
     "melon_check": {
         "ran": True,
-        "original_calls": [{"name": "send_money", "arguments": {"recipient": "attacker"}}],
-        "masked_calls": [{"name": "send_money", "arguments": {"recipient": "attacker"}}],
+        "original_calls": [
+            {"name": "send_money", "arguments": {"recipient": "attacker"}}
+        ],
+        "masked_calls": [
+            {"name": "send_money", "arguments": {"recipient": "attacker"}}
+        ],
         "distance": 0.0,
         "verdict": "block",
     },
@@ -35,8 +39,15 @@ TRACE = {
 def test_render_shows_the_whole_verdict_path():
     page = render([TRACE])
 
-    for expected in ("user_task_0", "escalate", "block", "REGION_1", "REGION_2",
-                     "send_money", "Converged once the real task was removed."):
+    for expected in (
+        "user_task_0",
+        "escalate",
+        "block",
+        "REGION_1",
+        "REGION_2",
+        "send_money",
+        "Converged once the real task was removed.",
+    ):
         assert expected in page
     assert page.startswith("<!doctype html>")
 
@@ -54,7 +65,12 @@ def test_labels_are_rendered_as_pairs():
 
 
 def test_step_without_escalation_says_so_instead_of_showing_an_empty_table():
-    trace = {**TRACE, "melon_check": None, "policy_verdict": "safe", "final_action": "execute"}
+    trace = {
+        **TRACE,
+        "melon_check": None,
+        "policy_verdict": "safe",
+        "final_action": "execute",
+    }
     page = render([trace])
 
     assert "did not run" in page

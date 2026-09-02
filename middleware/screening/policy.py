@@ -121,13 +121,17 @@ def is_read_only(tool_name: str) -> bool:
 ENFORCE_CONFIDENTIALITY_BY_DEFAULT = False
 
 
-def policy_label(tool_name: str, enforce_confidentiality: bool = ENFORCE_CONFIDENTIALITY_BY_DEFAULT) -> Label:
+def policy_label(
+    tool_name: str, enforce_confidentiality: bool = ENFORCE_CONFIDENTIALITY_BY_DEFAULT
+) -> Label:
     """P: the most restrictive context this call may be made from."""
     name = tool_name.lower()
     if any(keyword in name for keyword in EXFILTRATION_SINKS):
         return Label(
             Integrity.TRUSTED,
-            Confidentiality.PUBLIC if enforce_confidentiality else Confidentiality.PRIVATE,
+            Confidentiality.PUBLIC
+            if enforce_confidentiality
+            else Confidentiality.PRIVATE,
         )
     if is_read_only(name):
         return UNCONSTRAINED
@@ -194,7 +198,11 @@ def check(
 
 def _describe(label: Label) -> str:
     integrity = (
-        "trusted" if label.integrity is Integrity.TRUSTED else "untrusted (it came from outside)"
+        "trusted"
+        if label.integrity is Integrity.TRUSTED
+        else "untrusted (it came from outside)"
     )
-    confidentiality = "public" if label.confidentiality is Confidentiality.PUBLIC else "private"
+    confidentiality = (
+        "public" if label.confidentiality is Confidentiality.PUBLIC else "private"
+    )
     return f"{integrity} and {confidentiality}"

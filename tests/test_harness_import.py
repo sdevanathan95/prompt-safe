@@ -4,7 +4,12 @@ set or any network call. Actual runs are explicit and out of scope for
 tests/ — see eval/harness.py's module docstring.
 """
 
-from eval.harness import CHEAP_MODEL_BY_PROVIDER, CaseResult, build_pipeline, run_suite_subset
+from eval.harness import (
+    CHEAP_MODEL_BY_PROVIDER,
+    CaseResult,
+    build_pipeline,
+    run_suite_subset,
+)
 
 
 def test_cheap_model_defaults_present_for_both_providers():

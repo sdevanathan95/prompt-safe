@@ -18,8 +18,8 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from middleware.melon.cache import ToolCallCache
 from middleware.melon.engine import AgentCallFn, make_escalate_fn
@@ -139,14 +139,19 @@ class Session:
             escalate_fn = None
             if self.melon_agent_call_fn is not None:
                 escalate_fn = make_escalate_fn(
-                    tool_output_text="\n\n".join(content for _, content in self._tool_outputs),
+                    tool_output_text="\n\n".join(
+                        content for _, content in self._tool_outputs
+                    ),
                     agent_call_fn=self.melon_agent_call_fn,
                     system_message=self.system_message,
                     cache=self._masked_call_cache,
                 )
 
             result = check_calls(
-                self._step, screened, [call], escalate_fn=escalate_fn,
+                self._step,
+                screened,
+                [call],
+                escalate_fn=escalate_fn,
                 enforce_confidentiality=self.enforce_confidentiality,
             )
             trace = result.trace
@@ -193,8 +198,8 @@ class NoActiveSession(RuntimeError):
 def session_scope(session: Session):
     """Bind `session` for the duration of the block.
 
-        with session_scope(Session(task, judge_fn=openai_judge())):
-            agent.run()
+    with session_scope(Session(task, judge_fn=openai_judge())):
+        agent.run()
     """
     token = _CURRENT_SESSION.set(session)
     try:
