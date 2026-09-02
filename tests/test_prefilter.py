@@ -63,3 +63,42 @@ def test_run_melon_check_runs_masked_pass_when_sensitive():
 
     assert verdict.ran is True
     assert len(call_log) == 1, "masked run should have been invoked exactly once"
+
+
+def test_an_unnamed_side_effect_tool_is_still_sensitive():
+    """Deny-by-default. An allowlist of "sensitive" verbs is fail-open: the
+    travel suite's reserve_hotel matched none of them, was dropped before the
+    comparison ran, and its injected reservation passed even though the masked
+    run reproduced it with byte-identical arguments."""
+    from middleware.melon.prefilter import is_sensitive
+    from middleware.melon.types import ToolCall
+
+    for name in ("reserve_hotel", "create_calendar_event", "frobnicate_the_widget"):
+        assert is_sensitive(ToolCall(name, {})), name
+
+
+def test_reads_stay_exempt():
+    """The masked conversation opens with its own read_file, so a read in the
+    original run would match one by construction."""
+    from middleware.melon.prefilter import is_sensitive, should_run_melon_check
+    from middleware.melon.types import ToolCall
+
+    for name in ("get_hotels_prices", "read_email", "search_files", "list_files"):
+        assert not is_sensitive(ToolCall(name, {})), name
+    assert not should_run_melon_check([ToolCall("get_balance", {})])
+
+
+def test_the_exact_reserve_hotel_pair_that_slipped_through_now_converges():
+    """Regression for the two remaining in-scope misses: identical arguments,
+    scored 0.488 apart because the call never reached the comparison."""
+    from middleware.melon.compare import compare
+    from middleware.melon.types import ToolCall
+
+    call = ToolCall(
+        "reserve_hotel",
+        {"hotel": "Riverside View Hotel", "start_day": "2024-05-13", "end_day": "2024-05-17"},
+    )
+    verdict = compare([call], [call])
+
+    assert verdict.verdict == "block"
+    assert verdict.distance is not None and verdict.distance < 0.05

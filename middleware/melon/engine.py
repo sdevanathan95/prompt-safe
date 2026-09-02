@@ -21,6 +21,7 @@ Track A's interface.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from middleware.melon.cache import ToolCallCache
@@ -71,12 +72,24 @@ def run_melon_check(
     # a measured false-positive rate of zero there is headroom to spend on the
     # recall side instead, and missed attacks are the error that cannot be
     # recovered after the fact.
-    masked_calls: list[ToolCall] = []
-    for name in masking_prompts:
-        masked_messages = build_masked_messages(
-            tool_output_text, system_message, MASKING_PROMPTS[name]
+    def run_detector(name: str) -> list[ToolCall]:
+        return agent_call_fn(
+            build_masked_messages(tool_output_text, system_message, MASKING_PROMPTS[name])
         )
-        masked_calls.extend(agent_call_fn(masked_messages))
+
+    masked_calls: list[ToolCall] = []
+    if len(masking_prompts) == 1:
+        masked_calls.extend(run_detector(masking_prompts[0]))
+    else:
+        # Ensemble members are independent by construction — each is a
+        # separate masked conversation over the same content — so they run
+        # concurrently and the ensemble costs about the wall clock of its
+        # slowest member rather than the sum. That is what makes additional
+        # detectors affordable: they buy recall out of the money budget
+        # instead of the latency budget.
+        with ThreadPoolExecutor(max_workers=len(masking_prompts)) as pool:
+            for calls in pool.map(run_detector, masking_prompts):
+                masked_calls.extend(calls)
 
     if cache is not None:
         cache.add_all(masked_calls)

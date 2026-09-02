@@ -8,20 +8,23 @@ should happen, so skip straight to "safe" without paying for it.
 from __future__ import annotations
 
 from middleware.melon.types import MelonVerdict, ToolCall
+from middleware.screening.policy import is_read_only
 
-# Substrings matched against the lowercased tool name. Not a final list —
-# a placeholder heuristic, expand against real tool vocabularies once
-# Week 2 integration exposes them.
-SENSITIVE_ACTION_KEYWORDS = (
-    "send", "forward", "delete", "remove", "transfer", "pay", "purchase",
-    "book", "post", "publish", "share", "write", "create", "update",
-    "execute", "run",
-)
+# Whether a call can cause harm at all. Deny-by-default, exactly as in
+# middleware/screening/policy.py, and for the same reason: an allowlist of
+# "sensitive" verbs is fail-open, and anything nobody thought to name is
+# silently exempted from the whole counterfactual test.
+#
+# That was not hypothetical. `reserve_hotel` matched none of the previous
+# keywords, so it was dropped before the comparison ran — and the travel
+# suite's injected reservation therefore passed even though the masked run
+# reproduced it with byte-identical arguments. Reads stay exempt because the
+# masked conversation opens with its own read_file and would match one by
+# construction.
 
 
 def is_sensitive(call: ToolCall) -> bool:
-    name = call.name.lower()
-    return any(keyword in name for keyword in SENSITIVE_ACTION_KEYWORDS)
+    return not is_read_only(call.name)
 
 
 def should_run_melon_check(original_calls: list[ToolCall]) -> bool:

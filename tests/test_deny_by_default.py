@@ -109,3 +109,42 @@ def test_ensemble_pools_every_detectors_calls():
 
     assert len(seen) == 4
     assert verdict.verdict == "block"
+
+
+def test_ensemble_members_run_concurrently_not_in_sequence():
+    """Independent masked conversations over the same content. Running them
+    in sequence would make each extra detector cost a full round trip of
+    latency, which is the budget that has to stay small."""
+    import threading
+    import time
+
+    from middleware.melon.engine import run_melon_check
+
+    injected = ToolCall("send_money", {"recipient": "attacker", "amount": 100})
+    live = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def agent_call_fn(messages):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.05)
+        with lock:
+            live -= 1
+        return []
+
+    run_melon_check([injected], "output", agent_call_fn, masking_prompts=DEFAULT_ENSEMBLE)
+    assert peak > 1, "ensemble members ran sequentially"
+
+
+def test_a_single_detector_does_not_pay_for_a_thread_pool():
+    from middleware.melon.engine import run_melon_check
+
+    seen = []
+    run_melon_check(
+        [ToolCall("send_money", {"amount": 1})], "output",
+        lambda m: seen.append(m) or [], masking_prompts=("summarize",),
+    )
+    assert len(seen) == 1

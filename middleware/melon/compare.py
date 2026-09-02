@@ -20,7 +20,9 @@ Three properties of that rule matter and were each got wrong here before:
 
 from __future__ import annotations
 
-from adapters.embeddings import cosine_similarity, embed
+import numpy as np
+
+from adapters.embeddings import cosine_similarity, embed, embed_many
 from middleware.melon.prefilter import is_sensitive
 from middleware.melon.types import MelonVerdict, ToolCall
 
@@ -74,14 +76,28 @@ def most_similar_pair(
     All pairs, not name-matched pairs: the masked run frequently reaches the
     same effect through a differently-named tool, and the whole point of an
     embedding comparison is to catch that.
+
+    Every text is embedded in one batch and the pairwise scores come from a
+    single matrix product. Embedding call-by-call instead made this the
+    dominant cost of the entire pipeline -- one ~470ms round trip per distinct
+    call, 5.5 seconds for a three-by-three comparison -- which is why the
+    always-on screener looked cheap next to it and the real bottleneck was
+    invisible.
     """
-    best = (0.0, None, None)
-    for original in original_calls:
-        for masked in masked_calls:
-            score = call_similarity(original, masked)
-            if score > best[0]:
-                best = (score, original, masked)
-    return best
+    if not original_calls or not masked_calls:
+        return (0.0, None, None)
+
+    original_texts = [render_call(c) for c in original_calls]
+    masked_texts = [render_call(c) for c in masked_calls]
+    vectors = embed_many(original_texts + masked_texts)
+
+    left = np.array(vectors[: len(original_texts)])
+    right = np.array(vectors[len(original_texts) :])
+    scores = left @ right.T
+
+    flat = int(np.argmax(scores))
+    row, column = divmod(flat, scores.shape[1])
+    return (float(scores[row, column]), original_calls[row], masked_calls[column])
 
 
 def compare(

@@ -27,10 +27,41 @@ completion against a whole masked re-execution.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from middleware.screening.regions import Region
 from middleware.screening.screener import JudgeFn
+
+# A task only delegates if it points somewhere. These are the shapes that
+# pointing takes in a natural request: a filename, a URL, a quoted identifier,
+# or a phrase that defers to a source. Checking for them costs nothing and is
+# a necessary condition -- if the user named no source, no source can have
+# been designated, so the alignment model call cannot clear the step and is
+# pure latency on the path that most needs to be fast.
+_POINTER_PATTERNS = (
+    re.compile(r"\b[\w\-.]+\.(txt|pdf|docx?|xlsx?|csv|md|json|ya?ml|html?)\b", re.I),
+    re.compile(r"https?://\S+|\bwww\.\S+", re.I),
+    re.compile(r"['\"][^'\"]{3,}['\"]"),
+    re.compile(
+        r"\b(accord(ing|ingly)|as (stated|listed|described|requested|instructed)|"
+        r"listed in|mentioned in|specified in|attached|the (file|document|email|"
+        r"message|page|website|link|note|invoice|bill|list)|follow the|"
+        r"do (what|the tasks)|instructions? (in|on|from))\b",
+        re.I,
+    ),
+)
+
+
+def task_points_at_a_source(task_description: str) -> bool:
+    """Whether the user's request refers to some external source at all.
+
+    Necessary, not sufficient: naming a file does not authorize everything the
+    file says. The model call still decides. This only skips that call when
+    the answer is already determined.
+    """
+    return any(pattern.search(task_description) for pattern in _POINTER_PATTERNS)
+
 
 ALIGNMENT_TOOL_SCHEMA = {
     "name": "report_task_alignment",
@@ -143,6 +174,14 @@ def check_alignment(
     gate is an optimization on top of a sound policy, so a broken judge must
     degrade to the unoptimized path, not to an error or to permission.
     """
+    if not task_points_at_a_source(task_description):
+        return AlignmentResult(
+            False,
+            False,
+            "The user's request does not refer to any external source, so "
+            "nothing in it designates where these values came from.",
+        )
+
     messages = build_alignment_messages(task_description, tool_name, arguments, source_regions)
     try:
         answer = judge_fn(messages, ALIGNMENT_TOOL_SCHEMA)

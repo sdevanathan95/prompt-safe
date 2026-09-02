@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from typing import Callable
 
+from adapters.retry import with_retry
+
 # Cheap models are the right default for the judge: it answers a narrow
 # relevance question, and RTBAS's own overhead table shows the screener is the
 # dominant added cost when run on a frontier model.
@@ -32,13 +34,13 @@ def openai_judge(model: str = DEFAULT_OPENAI_JUDGE_MODEL, client=None) -> Callab
         client = openai.OpenAI()
 
     def judge_fn(messages: list[dict], tool_schema: dict) -> dict:
-        response = client.chat.completions.create(
+        response = with_retry(lambda: client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=0,
             tools=[{"type": "function", "function": tool_schema}],
             tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
-        )
+        ))
         tool_calls = response.choices[0].message.tool_calls
         if not tool_calls:
             raise ValueError(
@@ -61,7 +63,7 @@ def anthropic_judge(model: str = DEFAULT_ANTHROPIC_JUDGE_MODEL, client=None) -> 
         system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
         turns = [m for m in messages if m["role"] != "system"]
 
-        response = client.messages.create(
+        response = with_retry(lambda: client.messages.create(
             model=model,
             max_tokens=1024,
             temperature=0,
@@ -75,7 +77,7 @@ def anthropic_judge(model: str = DEFAULT_ANTHROPIC_JUDGE_MODEL, client=None) -> 
                 }
             ],
             tool_choice={"type": "tool", "name": tool_schema["name"]},
-        )
+        ))
         for block in response.content:
             if getattr(block, "type", None) == "tool_use":
                 return dict(block.input)

@@ -15,6 +15,7 @@ knowing when reading numbers produced that way.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -157,6 +158,7 @@ def check_calls(
     escalate_fn: EscalateFn | None = None,
     enforce_confidentiality: bool = policy.ENFORCE_CONFIDENTIALITY_BY_DEFAULT,
     alignment_judge_fn=None,
+    alignment_results: list | None = None,
 ) -> StepResult:
     """Stage 2, escalating to Stage 3 only for the ambiguous bucket."""
     # Per-argument provenance rather than the step's joined label. The join
@@ -181,17 +183,47 @@ def check_calls(
     # document looks like. Ask whether the call serves the request before
     # paying for a masked re-execution. Can only downgrade, never permit
     # something already blocked.
+    #
+    # Every escalating call is checked, not just the one that drove the
+    # verdict. Clearing a step on one aligned call lets any other call in the
+    # same step through with it — measured: a travel step was cleared on a
+    # legitimate calendar event while the injected send_email rode along
+    # beside it. A step is only cleared if nothing in it needs escalating.
     alignment = None
-    if verdict == "escalate" and alignment_judge_fn is not None and driving is not None:
-        driving_call = proposed_calls[decisions.index(driving)]
-        alignment = check_alignment(
-            screened.task_description,
-            driving_call.name,
-            driving_call.arguments,
-            source_regions_for_call(driving_call.arguments, screened.regions),
-            alignment_judge_fn,
-        )
-        if alignment.clears_escalation:
+    if verdict == "escalate" and alignment_judge_fn is not None:
+        escalating = [
+            (call, decision)
+            for call, decision in zip(proposed_calls, decisions)
+            if decision.verdict == "escalate"
+        ]
+        def aligned(call: ToolCall):
+            return check_alignment(
+                screened.task_description,
+                call.name,
+                call.arguments,
+                source_regions_for_call(call.arguments, screened.regions),
+                alignment_judge_fn,
+            )
+
+        calls_to_check = [call for call, _ in escalating]
+        if alignment_results is not None:
+            # Precomputed by the caller, concurrently with Stage 1. The
+            # alignment question needs only the task, the call and the regions
+            # the call's values came from — none of which depend on the
+            # screener — so waiting for Stage 2 to ask it puts a whole model
+            # round trip in series for no reason.
+            index_of = {id(call): i for i, call in enumerate(proposed_calls)}
+            results = [alignment_results[index_of[id(call)]] for call in calls_to_check]
+        elif len(calls_to_check) <= 1:
+            results = [aligned(call) for call in calls_to_check]
+        else:
+            # Independent questions about independent calls. Sequentially they
+            # would put a model round trip per call onto the one budget that
+            # has to stay small.
+            with ThreadPoolExecutor(max_workers=min(len(calls_to_check), 8)) as pool:
+                results = list(pool.map(aligned, calls_to_check))
+        if results and all(r.clears_escalation for r in results):
+            alignment = results[0]
             verdict = "safe"
 
     timings = StageTimings(
