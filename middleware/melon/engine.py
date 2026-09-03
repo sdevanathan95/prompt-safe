@@ -32,7 +32,7 @@ from middleware.melon.masking import (
     build_masked_messages,
 )
 from middleware.melon.prefilter import prefiltered_safe_verdict, should_run_melon_check
-from middleware.melon.types import MelonVerdict, ToolCall
+from middleware.melon.types import MaskedRun, MelonVerdict, ToolCall
 
 AgentCallFn = Callable[[list[dict]], list[ToolCall]]
 
@@ -53,6 +53,7 @@ def run_melon_check(
     threshold: float = DEFAULT_THRESHOLD,
     cache: ToolCallCache | None = None,
     masking_prompts: tuple[str, ...] = ("summarize",),
+    run_control_arm: bool = False,
 ) -> MelonVerdict:
     """One step of the counterfactual test.
 
@@ -72,26 +73,48 @@ def run_melon_check(
     # a measured false-positive rate of zero there is headroom to spend on the
     # recall side instead, and missed attacks are the error that cannot be
     # recovered after the fact.
-    def run_detector(name: str) -> list[ToolCall]:
-        return agent_call_fn(
+    def run_detector(name: str) -> MaskedRun:
+        result = agent_call_fn(
             build_masked_messages(
                 tool_output_text, system_message, MASKING_PROMPTS[name]
             )
         )
+        # Callers may return just the calls; the response channel is optional
+        # and older call sites predate it.
+        return result if isinstance(result, MaskedRun) else MaskedRun(calls=list(result))
 
     masked_calls: list[ToolCall] = []
-    if len(masking_prompts) == 1:
-        masked_calls.extend(run_detector(masking_prompts[0]))
+    masked_texts: list[str] = []
+
+    def absorb(run: MaskedRun) -> None:
+        masked_calls.extend(run.calls)
+        if run.text:
+            masked_texts.append(run.text)
+
+    # The control arm contributes text only. It is told not to act, so a call
+    # from it would mean suppression failed, and pooling it would contaminate
+    # the very comparison it anchors.
+    describer_text = ""
+
+    # The control arm is just another independent masked conversation over the
+    # same content, so it belongs in the same pool as the ensemble members.
+    # Running it afterwards instead put a full model round trip in series on
+    # every escalated step and was measured adding ~2.3s to the mean.
+    arms = list(masking_prompts) + (["control"] if run_control_arm else [])
+
+    if len(arms) == 1:
+        only = run_detector(arms[0])
+        if arms[0] == "control":
+            describer_text = only.text
+        else:
+            absorb(only)
     else:
-        # Ensemble members are independent by construction — each is a
-        # separate masked conversation over the same content — so they run
-        # concurrently and the ensemble costs about the wall clock of its
-        # slowest member rather than the sum. That is what makes additional
-        # detectors affordable: they buy recall out of the money budget
-        # instead of the latency budget.
-        with ThreadPoolExecutor(max_workers=len(masking_prompts)) as pool:
-            for calls in pool.map(run_detector, masking_prompts):
-                masked_calls.extend(calls)
+        with ThreadPoolExecutor(max_workers=len(arms)) as pool:
+            for name, run in zip(arms, pool.map(run_detector, arms)):
+                if name == "control":
+                    describer_text = run.text
+                else:
+                    absorb(run)
 
     if cache is not None:
         cache.add_all(masked_calls)
@@ -99,6 +122,8 @@ def run_melon_check(
 
     verdict = compare(original_calls, masked_calls, threshold)
     verdict.placeholder_task = GENERAL_INSTRUCTIONS
+    verdict.masked_response = "\n\n".join(masked_texts)
+    verdict.describer_response = describer_text
     return verdict
 
 
@@ -109,6 +134,7 @@ def make_escalate_fn(
     threshold: float = DEFAULT_THRESHOLD,
     cache: ToolCallCache | None = None,
     masking_prompts: tuple[str, ...] = ("summarize",),
+    run_control_arm: bool = False,
 ) -> Callable[[list[ToolCall]], MelonVerdict]:
     def escalate_fn(proposed_calls: list[ToolCall]) -> MelonVerdict:
         return run_melon_check(
@@ -119,6 +145,7 @@ def make_escalate_fn(
             threshold,
             cache,
             masking_prompts,
+            run_control_arm,
         )
 
     return escalate_fn

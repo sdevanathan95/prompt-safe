@@ -35,44 +35,46 @@ from middleware.screening.labels import (
 
 Verdict = Literal["safe", "block", "escalate"]
 
-# Tools that push data out of the user's trust boundary. Integrity-sensitive
-# in every configuration; whether their *confidentiality* is also constrained
-# depends on enforce_confidentiality (see check()).
-EXFILTRATION_SINKS = (
-    "send_email",
-    "send_message",
-    "send_direct_message",
-    "send_channel_message",
-    "post",
-    "publish",
-    "share",
-    "add_user_to_channel",
-    "invite_user_to_slack",
-    "add_new_user",
+# Tools that push data outward. Only the *confidentiality* axis consults this
+# — integrity is already covered, because deny-by-default makes every
+# non-read a sink whether or not it appears here.
+#
+# Matched by shape rather than by name. Naming the tools of the benchmark this
+# was developed against would make the policy look like it generalizes while
+# actually encoding answers: an outward channel called something else would
+# sail past, and the measured numbers would be worth nothing outside that
+# benchmark. A prefix like "send_" or "publish_" is a claim about what the
+# verb means, which is checkable against any tool inventory.
+EXFILTRATION_PREFIXES = (
+    "send_",
+    "post_",
+    "publish_",
+    "share_",
+    "email_",
+    "message_",
+    "broadcast_",
+    "upload_",
+    "invite_",
+    "forward_",
 )
 
-# Tools with significant, hard-to-reverse side effects that do not themselves
-# republish data. Integrity must be trusted; confidentiality is unconstrained
-# because nothing leaves. Names follow RTBAS's own AgentDojo labeling
-# (arXiv:2502.08966 Table 1): send_money and update_transactions for banking,
-# book_hotel for travel, update_calendar for workspace.
-SIDE_EFFECT_SINKS = (
-    "send_money",
-    "transfer_money",
-    "schedule_transaction",
-    "update_scheduled_transaction",
-    "update_transaction",
-    "update_calendar",
-    "update_password",
-    "update_user_info",
-    "pay",
-    "purchase",
-    "book",
-    "reserve",
-    "delete",
-    "remove",
-    "cancel",
+# Outward channels whose names put the verb second — "add_user_to_channel"
+# admits an outsider to a place data sits, which is a disclosure even though
+# it starts with "add".
+EXFILTRATION_INFIXES = (
+    "_to_channel",
+    "_to_slack",
+    "_to_workspace",
+    "_to_group",
 )
+
+
+def is_exfiltration_sink(tool_name: str) -> bool:
+    name = tool_name.lower()
+    return any(name.startswith(p) for p in EXFILTRATION_PREFIXES) or any(
+        i in name for i in EXFILTRATION_INFIXES
+    )
+
 
 # Reads cannot violate a flow policy on their own — their *output* carries a
 # label forward, which is regions.py's job — so they are the only calls left
@@ -106,8 +108,39 @@ READ_ONLY_PREFIXES = (
 UNCONSTRAINED = TOP
 
 
-def is_read_only(tool_name: str) -> bool:
+# Reads that leave the machine. Exempting reads is only sound while the read
+# stays local: fetching a URL is a network egress, and if the attacker chose
+# the URL then the fetch itself is the attack — the visit is observable, and
+# anything encoded in the path is exfiltrated by making it.
+#
+# Measured: an injected task whose entire goal was "visit this URL",
+# achieved with a single page fetch and no other call, was invisible while every
+# get_-prefixed tool counted as harmless — six of nine misses on one suite.
+OUTBOUND_READ_KEYWORDS = (
+    "webpage",
+    "website",
+    "url",
+    "http",
+    "browse",
+    "visit",
+    "fetch_page",
+    "download",
+    "crawl",
+    "scrape",
+)
+
+
+def is_outbound_read(tool_name: str) -> bool:
     name = tool_name.lower()
+    return any(keyword in name for keyword in OUTBOUND_READ_KEYWORDS)
+
+
+def is_read_only(tool_name: str) -> bool:
+    """Local reads only. A read whose destination is chosen by the content it
+    is reading is not exempt — see OUTBOUND_READ_KEYWORDS."""
+    name = tool_name.lower()
+    if is_outbound_read(name):
+        return False
     return any(name.startswith(prefix) for prefix in READ_ONLY_PREFIXES)
 
 
@@ -126,7 +159,7 @@ def policy_label(
 ) -> Label:
     """P: the most restrictive context this call may be made from."""
     name = tool_name.lower()
-    if any(keyword in name for keyword in EXFILTRATION_SINKS):
+    if is_exfiltration_sink(name):
         return Label(
             Integrity.TRUSTED,
             Confidentiality.PUBLIC

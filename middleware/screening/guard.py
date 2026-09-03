@@ -19,10 +19,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from middleware.melon.response import differential_convergence, untrusted_assertions
 from middleware.melon.types import MelonVerdict, ToolCall
 from middleware.screening import policy
 from middleware.screening.alignment import check_alignment
-from middleware.screening.labels import Label
+from middleware.screening.labels import Integrity, Label
 from middleware.screening.provenance import (
     call_label,
     explain_call_label,
@@ -161,6 +162,9 @@ def check_calls(
     enforce_confidentiality: bool = policy.ENFORCE_CONFIDENTIALITY_BY_DEFAULT,
     alignment_judge_fn=None,
     alignment_results: list | None = None,
+    original_response: str = "",
+    masked_arms_fn: Callable[[], tuple[str, str]] | None = None,
+    check_response_channel: bool = False,
 ) -> StepResult:
     """Stage 2, escalating to Stage 3 only for the ambiguous bucket."""
     # Per-argument provenance rather than the step's joined label. The join
@@ -273,6 +277,31 @@ def check_calls(
         timings.melon_ms = (time.perf_counter() - melon_started) * 1000.0
         final_action, explanation = _resolve_escalation(melon_verdict, driving)
 
+    # Response channel. An injection whose goal is met by what the agent says
+    # calls no tool, so every check above clears it -- which is why this cannot
+    # be gated on the tool-call path having escalated. The gate is instead a
+    # free precondition: does the answer assert something that came from
+    # untrusted content and that the user never asked for?
+    response_verdict = None
+    if check_response_channel and original_response and screened.regions:
+        if untrusted_assertions(
+            original_response, screened.regions, screened.task_description
+        ):
+            follower = describer = ""
+            if melon_verdict is not None:
+                follower = melon_verdict.masked_response
+                describer = melon_verdict.describer_response
+            elif masked_arms_fn is not None:
+                follower, describer = masked_arms_fn()
+
+            if follower and describer:
+                response_verdict = differential_convergence(
+                    original_response, follower, describer
+                )
+                if response_verdict.complied and final_action == "execute":
+                    final_action = "block"
+                    explanation = response_verdict.explanation
+
     driving_label = (
         call_labels[decisions.index(driving)] if driving is not None else screened.label
     )
@@ -289,6 +318,7 @@ def check_calls(
         ),
         policy_verdict=verdict,
         melon_check=melon_verdict.to_trace_dict() if melon_verdict else None,
+        response_check=response_verdict.to_trace_dict() if response_verdict else None,
         final_action=final_action,
         explanation=explanation,
     )

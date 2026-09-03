@@ -160,7 +160,17 @@ def main(paths: list[str]) -> None:
         (suite, task) for suite in suites for task in response_only_injections(suite)
     }
 
-    print("TOOL-MEDIATED ATTACKS — what a tool-call defense can see")
+    print("ALL ATTACKS — including response-only, which the response channel now covers")
+    all_lines = [
+        summarize([c for c in everything if c.suite == suite], suite)
+        for suite in suites
+    ]
+    print("\n".join(all_lines))
+    print("-" * len(all_lines[0]))
+    print(summarize(everything, "COMBINED"))
+
+    print()
+    print("TOOL-MEDIATED ONLY — the subset a tool-call comparison alone can see")
     lines = [
         summarize([c for c in everything if c.suite == suite], suite, out_of_scope)
         for suite in suites
@@ -174,18 +184,19 @@ def main(paths: list[str]) -> None:
         succeeded = [c for c in excluded if c.attack_succeeded]
         stopped = [c for c in succeeded if c.stopped]
         print(
-            f"\nRESPONSE-ONLY ATTACKS — excluded above, out of scope by construction\n"
-            f"  {len(excluded)} cases, {len(succeeded)} succeeded, {len(stopped)} incidentally stopped.\n"
-            f"  Their goal is met by what the agent says, not by any tool call, so\n"
-            f"  there is nothing for a tool-call comparison to converge on."
+            f"\nRESPONSE-ONLY ATTACKS — no tool call at all; caught, if at all, by\n"
+            f"the response-channel comparison\n"
+            f"  {len(excluded)} cases, {len(succeeded)} succeeded, {len(stopped)} stopped "
+            f"({100 * len(stopped) / len(succeeded):.0f}% of successful ones)."
+            if succeeded else
+            f"\nRESPONSE-ONLY ATTACKS — {len(excluded)} cases, none succeeded."
         )
 
-    in_scope = [c for c in everything if (c.suite, c.injection) not in out_of_scope]
     missed = [
-        c for c in in_scope if c.is_attack and c.attack_succeeded and not c.stopped
+        c for c in everything if c.is_attack and c.attack_succeeded and not c.stopped
     ]
     if missed:
-        print(f"\nin-scope attacks that passed through ({len(missed)}):")
+        print(f"\nattacks that passed through ({len(missed)}):")
         for c in missed:
             print(
                 f"  {c.suite:<10} {c.user_task} / {c.injection}  policy={c.policy} action={c.action}"

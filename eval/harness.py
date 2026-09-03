@@ -62,7 +62,8 @@ from adapters.judge import (
 from adapters.retry import with_retry
 from middleware.melon.compare import DEFAULT_THRESHOLD
 from middleware.melon.engine import AgentCallFn, run_melon_check
-from middleware.melon.types import MelonVerdict, ToolCall
+from middleware.melon.masking import orthogonal_masking_prompt
+from middleware.melon.types import MaskedRun, MelonVerdict, ToolCall
 from middleware.screening.alignment import check_alignment
 from middleware.screening.guard import StepResult, check_calls, screen_step
 from middleware.screening.provenance import source_regions_for_call
@@ -80,6 +81,19 @@ CHEAP_MODEL_BY_PROVIDER = {
 }
 
 DEFAULT_ATTACK_NAME = "important_instructions"
+
+# Off. The response-channel comparison is implemented and its mechanism is
+# sound in principle, but measured on 73 attack and 3 benign steps its
+# decision statistic does not separate the two classes: 25 of 39 travel attack
+# deltas fall at or below the largest benign delta. Twelve blocks across
+# banking and travel were attributable to it alone, eleven of them attacks and
+# one a false positive — but with overlapping distributions those eleven
+# cannot be credited to the mechanism rather than to which side of an
+# arbitrary threshold they happened to land.
+#
+# Leaving it on would put an unvalidated component inside the headline number.
+# Set True to reproduce the response-channel measurements.
+RESPONSE_CHANNEL_ENABLED = False
 
 
 @dataclass
@@ -298,9 +312,10 @@ def _make_agent_call_fn(
     """
     runtime = FunctionsRuntime(suite.tools)
 
-    def agent_call_fn(messages: list[dict]) -> list[ToolCall]:
+    def agent_call_fn(messages: list[dict]) -> MaskedRun:
         conversation = _to_agentdojo_messages(messages)
         collected: list[ToolCall] = []
+        said: list[str] = []
 
         for _ in range(MASKED_RUN_MAX_TURNS):
             _, _, _, conversation, _ = with_retry(
@@ -308,6 +323,9 @@ def _make_agent_call_fn(
                     "", runtime, environment, conversation, {}
                 )
             )
+            spoken = conversation[-1].get("content")
+            if spoken:
+                said.append(get_text_content_as_str(spoken))
             calls = conversation[-1].get("tool_calls") or []
             if not calls:
                 break
@@ -332,7 +350,7 @@ def _make_agent_call_fn(
                     }
                 )
 
-        return collected
+        return MaskedRun(calls=collected, text="\n\n".join(said))
 
     return agent_call_fn
 
@@ -375,6 +393,7 @@ def _guarded_verdict(
     threshold: float,
     step: int = 1,
     masking_prompts: tuple[str, ...] = ("summarize",),
+    original_response: str = "",
 ) -> StepResult:
     """Run the full tiered pipeline over one finished episode.
 
@@ -393,6 +412,12 @@ def _guarded_verdict(
     tool_output_text = _extract_tool_output_text(messages)
     system_message = _extract_system_message(messages)
 
+    # The response comparison only means anything if the masked run is not
+    # doing the same job as the user; see middleware/melon/response.py.
+    prompts = masking_prompts
+    if prompts == ("summarize",):
+        prompts = (orthogonal_masking_prompt(user_task.PROMPT),)
+
     def run_masked() -> MelonVerdict:
         masked_element = melon_llm_element or llm_element
         agent_call_fn = _make_agent_call_fn(
@@ -404,7 +429,8 @@ def _guarded_verdict(
             agent_call_fn=agent_call_fn,
             system_message=system_message,
             threshold=threshold,
-            masking_prompts=masking_prompts,
+            masking_prompts=prompts,
+            run_control_arm=True,
         )
 
     trusted = _trusted_authors(environment)
@@ -437,6 +463,12 @@ def _guarded_verdict(
             escalate_fn=lambda calls: speculative.result(),
             alignment_judge_fn=judge_fn,
             alignment_results=[f.result() for f in alignments],
+            original_response=original_response,
+            check_response_channel=RESPONSE_CHANNEL_ENABLED,
+            masked_arms_fn=lambda: (
+                speculative.result().masked_response,
+                speculative.result().describer_response,
+            ),
         )
     return result
 
@@ -481,6 +513,7 @@ def run_benign_case(
         judge_fn,
         threshold,
         masking_prompts=masking_prompts,
+        original_response=output_text,
     )
     return CaseResult(
         user_task.ID,
@@ -550,6 +583,7 @@ def run_attack_case(
         judge_fn,
         threshold,
         masking_prompts=masking_prompts,
+        original_response=original_output,
     )
     return CaseResult(
         user_task.ID,

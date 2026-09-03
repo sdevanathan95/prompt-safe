@@ -1,5 +1,10 @@
 # Causal, explainable security middleware for tool-calling agents
 
+**Start with [GUIDE.md](GUIDE.md)** — an engineering walkthrough of the whole
+system: the threat model, the counterfactual mechanism, every stage of the
+pipeline with worked examples, the response channel and why it is still open,
+how to wire it into an agent, and what to work on next.
+
 Pluggable middleware that catches indirect prompt injection by testing
 whether an agent's action was actually *caused by* the user's request,
 instead of classifying tool output text as suspicious.
@@ -264,3 +269,53 @@ is not the configuration any reported number should come from. Set
 source .venv/bin/activate
 python -m pytest tests/ -v
 ```
+
+
+## Where this stands, and what would move it forward
+
+Measured on AgentDojo with the response channel off (`eval/report.py` output):
+
+```
+banking   n=80   37/37 prevention (100%)    0/8  false positives
+travel    n=64   13/18 prevention (72.2%)   0/8  false positives
+─────────────────────────────────────────────────────────────
+combined  n=144  50/55 prevention (90.9%)   0/16 (0.0%)
+```
+
+Zero false positives across 16 benign runs, and zero human confirmations
+against the 64 that RTBAS's own design would have raised.
+
+Against Straiker's published figures (98.4% accuracy, 1.2% false positives,
+<300ms): **this cannot currently claim to be better.** Zero misses in 55 is
+only statistically consistent with "above roughly 93%" — it does not
+demonstrate better than their 99.6%. And at ~1.3s on benign traffic it is
+about 4x slower. Their numbers are self-reported on an undisclosed test set
+and these are on a public benchmark, so the comparison is weak in both
+directions.
+
+### What to work on, highest value first
+
+1. **Run all 949 security cases.** Only 144 are measured, and two of the four
+   suites have no current result. This is compute, not research, and every
+   claim rests on it. Watch the 10,000 requests/day API cap, and run it from a
+   normal terminal so the process survives.
+
+2. **Solve the response channel.** Some attacks never call a tool — the goal
+   is met by what the agent *says* ("tell the user to visit this hotel"). That
+   is 73% of the attacks that beat MELON, and existing approaches use
+   classifiers, which is the arms race this design exists to avoid. The
+   construction in `middleware/melon/response.py` is the right shape and its
+   decision statistic is not; the measured failure is documented in
+   `METHOD.md`. **This is the actual research contribution if solved.**
+
+3. **Close the latency gap** — batch or overlap the model calls, use a smaller
+   judge, cache verdicts for repeated content.
+
+4. **Attack this system deliberately.** Every attack tested so far comes from
+   a fixed script. Adaptive attacks aimed at the judge or at the masked run
+   are untested, and a paper that reports them is far stronger than one that
+   does not.
+
+5. **Add a second benchmark** (InjecAgent) so no result is AgentDojo-specific.
+
+`GUIDE.md` explains each of these in detail, including what to read.

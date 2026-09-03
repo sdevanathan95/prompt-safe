@@ -37,6 +37,9 @@ class StepTrace:
     # Track B's MelonVerdict.to_trace_dict(), or None for a step that resolved
     # at the policy check without escalating.
     melon_check: dict | None = None
+    # Response-channel comparison, for steps where the counterfactual test
+    # ran. None when it did not.
+    response_check: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -47,6 +50,7 @@ class StepTrace:
             "screened_regions": self.screened_regions.to_dict(),
             "policy_verdict": self.policy_verdict,
             "melon_check": self.melon_check,
+            "response_check": self.response_check,
             "final_action": self.final_action,
             "explanation": self.explanation,
         }

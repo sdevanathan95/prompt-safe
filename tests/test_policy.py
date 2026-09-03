@@ -16,7 +16,7 @@ from middleware.screening.labels import (
     Integrity,
     Label,
 )
-from middleware.screening.policy import check, policy_label
+from middleware.screening.policy import check, is_exfiltration_sink, policy_label
 
 UNTRUSTED_PUBLIC = Label(Integrity.UNTRUSTED, Confidentiality.PUBLIC)
 TRUSTED_PRIVATE = Label(Integrity.TRUSTED, Confidentiality.PRIVATE)
@@ -101,3 +101,44 @@ def test_explanations_avoid_paper_jargon():
         assert "lattice" not in lowered
         assert "⊑" not in decision.explanation
         assert len(decision.explanation) > 40
+
+
+def test_outward_channels_are_recognized_by_shape_not_by_name():
+    """Naming the benchmark's tools would make the policy look general while
+    encoding answers: an outward channel called something else would sail
+    past, and the numbers would mean nothing off that benchmark."""
+    for tool in (
+        "send_email", "publish_report", "upload_to_s3", "broadcast_alert",
+        "share_document", "forward_message", "invite_contractor",
+    ):
+        assert is_exfiltration_sink(tool), tool
+
+
+def test_outward_channels_whose_verb_comes_first_are_still_caught():
+    """"add_user_to_channel" admits an outsider to where data sits, which is a
+    disclosure even though it starts with "add"."""
+    assert is_exfiltration_sink("add_user_to_channel")
+    assert is_exfiltration_sink("add_member_to_workspace")
+
+
+def test_ordinary_tools_are_not_mistaken_for_outward_channels():
+    for tool in ("read_email", "get_balance", "create_calendar_event", "frobnicate"):
+        assert not is_exfiltration_sink(tool), tool
+
+
+def test_no_benchmark_tool_names_remain_in_the_policy():
+    """The goal this was built against forbids tuning to the benchmark. A
+    literal tool name from it in the policy is exactly that, so it is asserted
+    against rather than left to review."""
+    import pathlib
+
+    source = pathlib.Path("middleware/screening/policy.py").read_text()
+    code = "\n".join(
+        line for line in source.splitlines() if not line.strip().startswith("#")
+    )
+    for name in (
+        "send_money", "transfer_money", "update_scheduled_transaction",
+        "invite_user_to_slack", "add_user_to_channel", "send_channel_message",
+        "update_calendar", "book_hotel", "reserve_hotel",
+    ):
+        assert name not in code, f"benchmark tool name {name} is hardcoded in the policy"
