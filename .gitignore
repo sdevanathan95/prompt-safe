@@ -9,3 +9,4 @@ node_modules/
 *.log
 TRACK_B_PLAN.md
 docs/
+.vscode/
