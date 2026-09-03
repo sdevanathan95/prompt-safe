@@ -318,4 +318,7 @@ directions.
 
 5. **Add a second benchmark** (InjecAgent) so no result is AgentDojo-specific.
 
-`GUIDE.md` explains each of these in detail, including what to read.
+[GUIDE.md](GUIDE.md) Part 9 is the full version of this list — fifteen
+items split into work that needs no new ideas and work that does, each with
+the evidence for why it matters, what to read, and what would count as
+having solved it.
