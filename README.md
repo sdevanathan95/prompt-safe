@@ -1,9 +1,12 @@
 # Causal, explainable security middleware for tool-calling agents
 
-**Start with [GUIDE.md](GUIDE.md)** — an engineering walkthrough of the whole
-system: the threat model, the counterfactual mechanism, every stage of the
-pipeline with worked examples, the response channel and why it is still open,
-how to wire it into an agent, and what to work on next.
+**New to the codebase? Start with [WALKTHROUGH.md](WALKTHROUGH.md)** — every
+file and function explained from zero, with worked examples, the full data
+flow, every model call and what it costs, and the known limitations.
+
+**[GUIDE.md](GUIDE.md)** is the engineering reasoning behind those choices:
+the threat model, the counterfactual mechanism, the response channel and why
+it is still open, how to wire it into an agent, and what to work on next.
 
 Pluggable middleware that catches indirect prompt injection by testing
 whether an agent's action was actually *caused by* the user's request,
@@ -73,6 +76,15 @@ eval/          Benchmark harness (AgentDojo), metrics reporting,
 demo/          Trace visualizer — renders a run as an HTML report
 docs/          Project brief and design notes
 ```
+
+Documentation:
+
+| file | what it covers |
+|---|---|
+| `WALKTHROUGH.md` | the code itself — every file and function, worked examples, every model call, the limitations |
+| `GUIDE.md` | why each design choice, stage by stage |
+| `METHOD.md` | claims against the three source papers, with measurements |
+| `middleware/trace/schema.md` | the trace contract both tracks write |
 
 ## Using it live
 
