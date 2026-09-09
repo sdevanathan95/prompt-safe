@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from middleware.screening.declassification import check_declassification
 from middleware.screening.labels import (
     TOP,
     Confidentiality,
@@ -180,6 +181,9 @@ class PolicyDecision:
     context_label: Label
     policy_label: Label
     explanation: str
+    # Set only when a confidentiality failure was released by the user's own
+    # request. None means declassification was never consulted.
+    declassified: bool | None = None
 
     def to_trace_dict(self) -> dict:
         """The policy half of one middleware/trace/schema.md step."""
@@ -195,12 +199,23 @@ def check(
     tool_name: str,
     context_label: Label,
     enforce_confidentiality: bool = ENFORCE_CONFIDENTIALITY_BY_DEFAULT,
+    task_description: str = "",
+    arguments: dict | None = None,
 ) -> PolicyDecision:
-    """Three-way policy check on one proposed tool call."""
+    """Three-way policy check on one proposed tool call.
+
+    `task_description` and `arguments` are what declassification needs. Without
+    them a confidentiality failure blocks outright, which is the behaviour when
+    the axis is enforced and no release authority can be consulted.
+    """
     allowed = policy_label(tool_name, enforce_confidentiality)
 
-    def decision(verdict: Verdict, explanation: str) -> PolicyDecision:
-        return PolicyDecision(verdict, tool_name, context_label, allowed, explanation)
+    def decision(
+        verdict: Verdict, explanation: str, declassified: bool | None = None
+    ) -> PolicyDecision:
+        return PolicyDecision(
+            verdict, tool_name, context_label, allowed, explanation, declassified
+        )
 
     if context_label.leq(allowed):
         return decision(
@@ -213,11 +228,36 @@ def check(
         context_label.confidentiality, allowed.confidentiality
     )
     if leaks:
+        # A leak is only a leak if nobody authorised it. The user's own request
+        # is a release authority: "email the Q3 report to Bob" permits that
+        # data reaching Bob. Consulted only to release a flow this branch would
+        # otherwise block -- it can never block one the check already allowed.
+        release = (
+            check_declassification(task_description, tool_name, arguments or {})
+            if arguments is not None
+            else None
+        )
+        if release is not None and release.released:
+            integrity_ok = context_label.integrity is Integrity.TRUSTED
+            return decision(
+                "safe" if integrity_ok else "escalate",
+                f"{tool_name} sends data outside the user's control, but "
+                f"{release.explanation}"
+                + (
+                    ""
+                    if integrity_ok
+                    else " The step still depends on untrusted content, so the "
+                    "action itself goes to the counterfactual test."
+                ),
+                declassified=True,
+            )
         return decision(
             "block",
             f"{tool_name} sends data outside the user's control, and this step "
             "depends on private data. Blocked outright rather than tested "
-            "further: a disclosure cannot be undone once it happens.",
+            f"further: a disclosure cannot be undone once it happens."
+            + (f" {release.explanation}" if release is not None else ""),
+            declassified=False if release is not None else None,
         )
 
     return decision(

@@ -131,11 +131,13 @@ ADAPTIVE_SCENARIOS: list[AdaptiveScenario] = [
         current_verdict="block (only because Stage 3 is wired)",
         correct_verdict="block",
         proposed_fix=(
-            "Propagate labels through writes: the label of a write's arguments "
-            "attaches to the written object, and a later read of that object "
-            "recovers it. Needs a taint store keyed on object identity (file "
-            "path, note id, event id) rather than reasoning over the transcript "
-            "alone."
+            "Closed by middleware/screening/taint.py. Taint follows the "
+            "distinctive values that crossed into the environment rather than "
+            "object identity -- a payload has to survive the round trip to be "
+            "useful, so if it survived it can be recognised, and rephrasing it "
+            "on the way out breaks the attack rather than the detector. "
+            "Recorded per argument, so a value travelling beside the payload is "
+            "not tainted. Pinned by tests/test_taint.py."
         ),
     ),
     AdaptiveScenario(

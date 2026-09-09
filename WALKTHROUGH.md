@@ -680,6 +680,8 @@ at all changes none of these values, because every decision was made about
 | `policy.py` | 241 | The three-way verdict. `context_label ⊑ policy_label` → safe / block / escalate. |
 | `alignment.py` | 206 | **LLM call.** "Does this call serve the user's stated task?" Can only downgrade escalate→safe. |
 | `guard.py` | 370 | The orchestrator. `screen_step()` before generation, `check_calls()` after. |
+| `declassification.py` | 150 | The user's request as a release authority, so the confidentiality axis can be enforced without blocking every legitimate send. No model call. |
+| `taint.py` | 135 | Taint that survives a write, so a payload copied into the user's own notes cannot read back as trusted. No model call. |
 | `ablation.py` | 204 | Ablates **content** with the task held fixed to find which region caused a call — the conditional-payload attack ⑤a misses. 2·log₂(n) probes. **Not called by the pipeline**; see §2.5⑤b. |
 | `live.py` | 243 | Real enforcement — `Session`, `protect()`, `@guard`. Blocks a call *before* it runs. |
 
@@ -723,7 +725,7 @@ at all changes none of these values, because every decision was made about
 | `eval/scenarios/adaptive.py` | 190 | Four attacks written against *this* defense, each with the verdict the code actually returns. Verified by `tests/test_adaptive_scenarios.py`. |
 | `demo/visualize.py` | 192 | `traces.jsonl` → self-contained `report.html`. |
 
-**262 unit tests in `tests/`, all passing.**
+**278 unit tests in `tests/`, all passing.**
 
 ---
 
@@ -2712,10 +2714,10 @@ present in name only.
 with benign utility that doesn't drop** — masking things the agent needed shows
 up immediately as utility loss, which is the metric that keeps this honest.
 
-## 13.5 Provenance laundering through the environment
+## 13.5 Provenance laundering through the environment — closed
 
-**The gap.** Labels are tracked across the transcript. They are **not** tracked
-across the *environment*.
+**The gap.** Labels were tracked across the transcript. They were **not**
+tracked across the *environment*.
 
 ```
 step 1  read_email()            -> poisoned text, labeled UNTRUSTED  ✓
@@ -2724,51 +2726,105 @@ step 5  read_notes()            -> authored by the user's own app
                                 -> labeled TRUSTED  ✗ taint is gone
 ```
 
-The write **launders the label**. Nothing notices, because `build_regions`
-labels by author and tool, and the note's author is now the user.
+The write launders the label, because after step 2 the author genuinely *is*
+the user.
 
-**Why it matters.** AgentDojo mostly doesn't exercise write-then-read round
-trips, so this shows up in **no number reported here** — which is precisely what
-makes it dangerous. Real agents with scratchpads, memory, or persistent notes do
-it constantly, and long-horizon memory poisoning is an active attack class.
+**Why it mattered more than the benchmark suggested.** AgentDojo barely
+exercises write-then-read round trips, so this showed up in **no number
+reported here** — which is precisely what made it dangerous. The 2025–26
+memory-poisoning literature makes the same point structurally: prompt-injection
+defenses do not cover persistence, because at the moment the payload is read
+back it carries no detectable pattern and comes from a trusted author.
 
-**The fix.** Propagate labels through writes: the label of a write's arguments
-attaches to the written object, and a later read recovers it. That needs a small
-taint store keyed on **object identity** (file path, note ID, event ID) rather
-than reasoning only over the transcript. The hard parts are identity (what is
-"the same object" after an edit?) and granularity (does a whole file inherit the
-label of one appended line?).
+**Implemented as `middleware/screening/taint.py`.** Measured through the real
+`Session`:
 
-**How you'd know it worked.** Build the scenario as a hand-crafted case in
-`eval/scenarios/` — it doesn't exist in AgentDojo — following the
-`injection_same_tool_different_recipient` pattern, and show the taint survives
-the round trip.
+```
+step 1  read_email   -> REGION_1  untrusted
+step 2  create_note  -> write recorded
+step 3  read_notes   -> REGION_3  untrusted   ← was trusted
+```
 
-## 13.6 The confidentiality axis is switched off
+**Two design choices worth stating, because the obvious versions are wrong.**
 
-**The gap.** `ENFORCE_CONFIDENTIALITY_BY_DEFAULT = False`. **Half the lattice is
-built, tested, and unused.**
+1. **Taint follows values, not object identity.** Keying a store on the written
+   object (file path, note id, event id) needs answers to "is this the same
+   object after an edit?" and "does a whole file inherit the label of one
+   appended line?" — neither of which has a good one. Tracking the distinctive
+   *values* that crossed the boundary sidesteps both: a payload has to survive
+   the round trip to be useful, so if it survived it is there to be recognised.
+   Rephrasing it on the way out breaks the *attack*, not the detector.
 
-**Why it's off.** Turning it on against integrity-oriented labels makes every
+2. **Per argument, not per call.** Recording every argument of an untrusted
+   call taints values that merely travelled beside the payload — a
+   `title="todo"` written next to a poisoned body would pull down every later
+   region containing the word "todo". Only values whose own provenance is
+   untrusted are recorded. Measured: the payload is stored, `"todo"` is not,
+   and an unrelated later note reading `"todo: buy milk"` stays **trusted**.
+
+Also: a **blocked** write records nothing — nothing crossed into the
+environment, so there is no taint to recover.
+
+Seven tests in `tests/test_taint.py`, including both false-positive
+directions. Costs no model call — the question is whether a literal value
+appears in a literal span.
+
+**What is still open.** The store is wired into `live.Session`, not into
+`eval/harness.py`, so no AgentDojo number exercises it — the benchmark has no
+round-trip case to exercise. A hand-built scenario in `eval/scenarios/` would
+be the way to measure it, and the attack is described in
+`eval/scenarios/adaptive.py`.
+
+## 13.6 The confidentiality axis is switched off — blocker removed
+
+**The gap.** `ENFORCE_CONFIDENTIALITY_BY_DEFAULT = False`. **Half the lattice
+was built, tested, and unused.**
+
+**Why it was off.** Turning it on against integrity-oriented labels makes every
 task that legitimately emails something the user owns a violation. The policy
 becomes "never send anything" — not a defense, an outage.
 
-**What's actually missing: declassification.** In IFC, private data reaching a
-public channel is a violation *unless some authority permits that specific
-flow*. The user's own request is exactly such an authority: *"email the Q3
-report to Bob"* declassifies the Q3 report, to Bob, once. Not to anyone else,
-and not anything else.
+**What was missing: declassification.** In IFC, private data reaching a public
+channel is a violation *unless some authority permits that specific flow*. The
+user's own request is exactly such an authority: *"email the Q3 report to Bob"*
+releases the Q3 report, to Bob, once.
 
-**Why it's tractable here.** Stage 2.5 already computes something very close on
-the integrity axis — *does this call serve what the user requested, and did the
-user designate this source?* Scoped declassification is the same question one
-axis over: *did the user's request authorize this data reaching this recipient?*
-**The machinery exists; what's missing is the formulation.**
+**Implemented as `middleware/screening/declassification.py`**, following
+Sabelfeld and Sands — it answers the two axes a per-call check can actually
+answer (**what** is released, **who** to), and explicitly does not model
+*where* or *when*: a release is not tracked as spent, so a task naming Bob
+authorises every send to Bob for that turn. Stated rather than hidden.
 
-**What to read.** Sabelfeld and Sands, *Declassification: Dimensions and
-Principles* — it decomposes declassification into **who** may release, **what**,
-**where**, and **when**. Those four axes are the right skeleton, and using them
-connects the design to forty years of IFC work rather than reinventing it.
+Measured end to end, with the axis **on**:
+
+| case | verdict |
+|---|---|
+| email report to `bob@corp.com` (user named the address) | `execute` |
+| email report to "Bob" (user named the person) | `execute` |
+| exfiltrate to an address the user never mentioned | **`block`** |
+| legitimate send with an attacker address riding along | **`block`** |
+
+Compare to the axis being **off**, where the last two only reached `ask_user`.
+So enforcing it is now a strict improvement: **same utility on the legitimate
+cases, and exfiltration stopped outright instead of deferred to a human.**
+
+**Two details that keep it from being a hole.**
+
+1. **Every destination must be named, not just one.** A send to Bob *and* to an
+   unnamed address is not partially released — that is exactly the shape of an
+   exfiltration riding beside a legitimate send.
+2. **It never relaxes the integrity axis.** Releasing a flow says the
+   destination is authorised; it says nothing about whether untrusted content
+   *chose* the action. An untrusted step still goes to the counterfactual test.
+
+Matching is on a **word boundary**, not a substring — that is what makes short
+local parts safe to accept ("Borrow the book" must not authorise `bo@evil.com`),
+and generic mailboxes (`info@`, `admin@`, `support@`) are named explicitly
+rather than inferred from length.
+
+**Still open:** the default remains `False`. Flipping it should follow an
+AgentDojo run with the axis on, which the rate-limit ceiling in §14.1 has so
+far prevented. Nine tests in `tests/test_declassification.py`.
 
 ## 13.7 The thresholds are inherited, not calibrated
 

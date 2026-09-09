@@ -99,10 +99,18 @@ def screen_step(
     judge_fn: JudgeFn,
     start_index: int = 1,
     trusted_authors: frozenset[str] = frozenset(),
+    preset_regions: list[Region] | None = None,
 ) -> ScreenedStep:
-    """Stage 1: tag, screen, redact. Call before the agent generates."""
+    """Stage 1: tag, screen, redact. Call before the agent generates.
+
+    `preset_regions` substitutes an already-labelled region list for the one
+    `build_regions` would derive. It exists for `taint.TaintStore.relabel`,
+    whose labels come from the session's write history rather than from the
+    transcript, and which therefore cannot be expressed as a tool-name or
+    author rule inside `regions.py`.
+    """
     started = time.perf_counter()
-    regions = build_regions(
+    regions = preset_regions if preset_regions is not None else build_regions(
         tool_outputs, start_index=start_index, trusted_authors=trusted_authors
     )
     screen_result = _screen_if_it_can_change_anything(
@@ -180,7 +188,13 @@ def check_calls(
         for call in proposed_calls
     ]
     decisions = [
-        policy.check(call.name, label, enforce_confidentiality)
+        policy.check(
+            call.name,
+            label,
+            enforce_confidentiality,
+            task_description=screened.task_description,
+            arguments=call.arguments,
+        )
         for call, label in zip(proposed_calls, call_labels)
     ]
     verdict = _worst_verdict(decisions)

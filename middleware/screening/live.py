@@ -26,6 +26,7 @@ from middleware.melon.engine import AgentCallFn, make_escalate_fn
 from middleware.melon.types import ToolCall
 from middleware.screening.guard import check_calls, screen_step
 from middleware.screening.screener import JudgeFn
+from middleware.screening.taint import TaintStore
 from middleware.trace.logger import TraceLogger
 from middleware.trace.schema import StepTrace
 
@@ -89,12 +90,42 @@ class Session:
         # completes the real task first and acts on the injection later is
         # only caught if earlier masked calls are still being compared.
         self._masked_call_cache = ToolCallCache()
+        # Taint that survives a write. Without it a payload copied into the
+        # user's own notes reads back as trusted -- see screening/taint.py.
+        self._taint = TaintStore()
 
     def observe(self, tool_name: str, output) -> None:
         """Record a tool's output so later calls are screened against it.
         Call this after any tool execution the wrapped functions didn't
         themselves perform (e.g. a read the agent issued directly)."""
         self._tool_outputs.append((tool_name, str(output)))
+
+    def _screen(self):
+        """Stage 1 over everything seen so far, with laundered taint restored.
+
+        The relabel runs after `build_regions` rather than inside it: what a
+        region *is* comes from the transcript, and what it *carries* comes from
+        the session's own write history. Keeping them separate is what lets
+        `regions.py` stay agent-agnostic.
+        """
+        screened = screen_step(
+            self._tool_outputs,
+            self.task_description,
+            self.judge_fn,
+            trusted_authors=self.trusted_authors,
+        )
+        if not len(self._taint):
+            return screened
+        restored = self._taint.relabel(screened.regions)
+        if restored == screened.regions:
+            return screened
+        return screen_step(
+            [(r.source_tool or "", r.content) for r in restored],
+            self.task_description,
+            self.judge_fn,
+            trusted_authors=self.trusted_authors,
+            preset_regions=restored,
+        )
 
     def redacted_context(self) -> str:
         """The tool history with regions the next decision must not depend on
@@ -107,13 +138,7 @@ class Session:
         is built, which means the caller has to ask for it — hence a method
         rather than something `protect` can do on its own.
         """
-        screened = screen_step(
-            self._tool_outputs,
-            self.task_description,
-            self.judge_fn,
-            trusted_authors=self.trusted_authors,
-        )
-        return screened.redaction.text
+        return self._screen().redaction.text
 
     def protect(self, fn):
         """Wrap a tool function so it only runs after clearing Stages 1-3.
@@ -130,12 +155,7 @@ class Session:
             self._step += 1
             call = ToolCall(name=fn.__name__, arguments=kwargs)
 
-            screened = screen_step(
-                self._tool_outputs,
-                self.task_description,
-                self.judge_fn,
-                trusted_authors=self.trusted_authors,
-            )
+            screened = self._screen()
             escalate_fn = None
             if self.melon_agent_call_fn is not None:
                 escalate_fn = make_escalate_fn(
@@ -168,6 +188,16 @@ class Session:
                     raise Blocked(trace)
 
             output = fn(**kwargs)
+            # A call that carried untrusted values into the environment leaves
+            # them recoverable, so reading them back later cannot launder the
+            # label. Recorded after execution: a blocked call wrote nothing.
+            self._taint.record_write(
+                call.name,
+                kwargs,
+                screened.regions,
+                self.task_description,
+                screened.label,
+            )
             self.observe(fn.__name__, output)
             return output
 
