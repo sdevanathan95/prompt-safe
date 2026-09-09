@@ -168,11 +168,13 @@ def test_trace_records_masked_regions_and_both_sides_of_the_comparison():
     assert trace["screened_regions"]["relevant"] == ["REGION_1"]
     assert set(trace["screened_regions"]["masked"]) == {"REGION_2", "REGION_3"}
     assert trace["screened_regions"]["labels"]["REGION_2"]["integrity"] == "untrusted"
+    # `amount=5` is too short to trace to any source, so the call takes the
+    # untraceable floor rather than the screener's dependency label.
     assert trace["context_label"] == {
-        "integrity": "trusted",
+        "integrity": "untrusted",
         "confidentiality": "public",
     }
-    assert trace["source_provenance"] == "trusted"
+    assert trace["source_provenance"] == "untrusted"
     assert json.dumps(trace)
 
 

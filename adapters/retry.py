@@ -20,11 +20,41 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
-DEFAULT_MAX_ATTEMPTS = 5
-DEFAULT_BASE_DELAY_SECONDS = 1.0
+# A tokens-per-minute limit is not a transient blip: once an account is
+# saturated it stays saturated until the window rolls, so the retry has to be
+# able to outlast a full minute. Five attempts at a 1s base gave up after ~15s
+# of total backoff, which was measured losing 11 of 30 concurrent cases to 429s
+# on a 200k TPM account while the account itself was healthy.
+DEFAULT_MAX_ATTEMPTS = 8
+DEFAULT_BASE_DELAY_SECONDS = 1.5
+# Cap on any single wait. Without it the last attempts of an 8-deep backoff are
+# minutes long, which turns one saturated window into a stalled run.
+DEFAULT_MAX_DELAY_SECONDS = 45.0
 # Jitter keeps concurrent ensemble members from retrying in lockstep and
 # re-colliding on the same limit.
 DEFAULT_JITTER_SECONDS = 0.4
+
+
+def _retry_after(error: Exception) -> float | None:
+    """The provider's own instruction on when to come back, if it gave one.
+
+    A server that says how long to wait knows better than an exponential
+    guess, and honouring it is what keeps a fleet of concurrent callers from
+    all probing a saturated limit early.
+    """
+    headers = getattr(getattr(error, "response", None), "headers", None)
+    if not headers:
+        return None
+    for key in ("retry-after-ms", "retry-after"):
+        raw = headers.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        return value / 1000.0 if key.endswith("-ms") else value
+    return None
 
 
 def _is_retryable(error: Exception) -> bool:
@@ -45,6 +75,7 @@ def with_retry(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     base_delay: float = DEFAULT_BASE_DELAY_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    max_delay: float = DEFAULT_MAX_DELAY_SECONDS,
 ) -> T:
     """Run `call`, retrying transient provider failures with backoff.
 
@@ -58,8 +89,10 @@ def with_retry(
         except Exception as error:
             if not _is_retryable(error) or attempt == max_attempts - 1:
                 raise
-            delay = base_delay * (2**attempt) + random.uniform(
+            advised = _retry_after(error)
+            backoff = min(base_delay * (2**attempt), max_delay)
+            delay = max(advised or 0.0, backoff) + random.uniform(
                 0, DEFAULT_JITTER_SECONDS
             )
-            sleep(delay)
+            sleep(min(delay, max_delay))
     raise AssertionError("unreachable")

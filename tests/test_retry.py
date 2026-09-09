@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 from adapters.retry import with_retry
@@ -73,3 +75,60 @@ def test_a_call_that_works_first_time_never_sleeps():
     slept = []
     assert with_retry(lambda: 42, sleep=slept.append) == 42
     assert slept == []
+
+
+class _Response:
+    def __init__(self, headers):
+        self.headers = headers
+
+
+def _rate_limited(headers=None):
+    error = Exception("429")
+    error.status_code = 429
+    if headers is not None:
+        error.response = _Response(headers)
+    return error
+
+
+def test_honours_the_providers_own_retry_after_header():
+    """A server that says when to come back knows better than an exponential
+    guess, and ignoring it makes a fleet of callers probe a saturated limit
+    early."""
+    slept: list[float] = []
+    attempts = {"n": 0}
+
+    def call():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise _rate_limited({"retry-after": "20"})
+        return "ok"
+
+    assert with_retry(call, sleep=slept.append) == "ok"
+    assert slept[0] >= 20.0
+
+
+def test_retry_after_ms_is_read_as_milliseconds():
+    slept: list[float] = []
+    attempts = {"n": 0}
+
+    def call():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise _rate_limited({"retry-after-ms": "3000"})
+        return "ok"
+
+    with_retry(call, sleep=slept.append)
+    assert 3.0 <= slept[0] < 4.0
+
+
+def test_no_single_wait_exceeds_the_cap():
+    """One saturated window must not stall the run for minutes."""
+    slept: list[float] = []
+
+    def call():
+        raise _rate_limited()
+
+    with contextlib.suppress(Exception):
+        with_retry(call, sleep=slept.append)
+    assert slept, "expected retries"
+    assert max(slept) <= 45.0

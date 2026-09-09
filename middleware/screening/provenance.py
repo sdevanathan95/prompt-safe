@@ -140,6 +140,27 @@ def source_regions_for_call(
     return matched
 
 
+def _untraceable_label(regions: list[Region], fallback: Label) -> Label:
+    """The label for a call whose arguments carry no traceable evidence.
+
+    The fallback is the screener's dependency label, and the screener is a
+    model reading attacker-controlled text. For a call whose arguments *can* be
+    traced, that does not matter -- `argument_label` scans every region
+    directly, so a region that talks the screener out of marking it relevant
+    still supplies its own label through the argument. A call with nothing to
+    trace has no such independent path, and the screener's opinion becomes the
+    whole answer.
+
+    So the floor: while any untrusted region is in the history, an untraceable
+    call is untrusted. A compromised screener can then cost precision on these
+    calls but cannot clear one. Reads are unaffected -- the policy leaves them
+    unconstrained regardless of context.
+    """
+    if any(region.label.integrity is Integrity.UNTRUSTED for region in regions):
+        return Label(Integrity.UNTRUSTED, fallback.confidentiality)
+    return fallback
+
+
 def call_label(
     arguments: dict,
     regions: list[Region],
@@ -148,12 +169,11 @@ def call_label(
 ) -> Label:
     """The label of a call, joined over where its arguments actually came from.
 
-    An empty argument list yields the fallback: a call with nothing to trace
-    is exactly the case where the step-level label is the only evidence there
-    is.
+    A call with nothing traceable -- no arguments, or none distinctive enough
+    to locate -- takes the untraceable floor rather than the raw fallback.
     """
-    if not arguments:
-        return fallback
+    if not arguments or not any(is_distinctive(v) for v in arguments.values()):
+        return _untraceable_label(regions, fallback)
 
     per_argument = join_all(
         argument_label(value, regions, task_description, fallback)

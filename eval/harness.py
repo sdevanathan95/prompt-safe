@@ -622,6 +622,7 @@ def run_suite_subset(
     judge_model: str | None = None,
     masking_prompts: tuple[str, ...] = ("summarize",),
     melon_model: str | None = None,
+    max_workers: int = 1,
 ) -> list[CaseResult]:
     """Runs the benign case plus one attack per injection task (capped at
     `max_injection_tasks` if given — a suite typically has more than one)
@@ -641,39 +642,72 @@ def run_suite_subset(
 
     user_task_ids = list(suite.user_tasks.keys())[:max_user_tasks]
     injection_task_ids = list(suite.injection_tasks.keys())[:max_injection_tasks]
-    results: list[CaseResult] = []
 
-    for user_task_id in user_task_ids:
-        user_task = suite.get_user_task_by_id(user_task_id)
-        results.append(
-            run_benign_case(
-                pipeline,
-                llm_element,
-                suite,
-                user_task,
-                judge_fn,
-                threshold,
-                masking_prompts,
-                melon_llm_element,
-            )
+    # Each case is an independent episode against its own environment copy, so
+    # they parallelize cleanly. Sequentially a full suite is hours of waiting on
+    # network round trips; the provider rate limit, not the CPU, is the binding
+    # constraint, and adapters.retry already absorbs a 429 as a pause.
+    def benign(user_task_id: str) -> CaseResult:
+        return run_benign_case(
+            pipeline,
+            llm_element,
+            suite,
+            suite.get_user_task_by_id(user_task_id),
+            judge_fn,
+            threshold,
+            masking_prompts,
+            melon_llm_element,
         )
-        for injection_task_id in injection_task_ids:
-            results.append(
-                run_attack_case(
-                    pipeline,
-                    llm_element,
-                    suite,
-                    user_task,
-                    attack,
-                    injection_task_id,
-                    judge_fn,
-                    threshold,
-                    masking_prompts,
-                    melon_llm_element,
-                )
-            )
 
+    def attacked(pair: tuple[str, str]) -> CaseResult:
+        user_task_id, injection_task_id = pair
+        return run_attack_case(
+            pipeline,
+            llm_element,
+            suite,
+            suite.get_user_task_by_id(user_task_id),
+            attack,
+            injection_task_id,
+            judge_fn,
+            threshold,
+            masking_prompts,
+            melon_llm_element,
+        )
+
+    pairs = [(u, i) for u in user_task_ids for i in injection_task_ids]
+    if max_workers <= 1:
+        return [benign(u) for u in user_task_ids] + [attacked(p) for p in pairs]
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        benign_futures = [pool.submit(benign, u) for u in user_task_ids]
+        attack_futures = [pool.submit(attacked, p) for p in pairs]
+        results = [_settled(f, u, None) for f, u in zip(benign_futures, user_task_ids)]
+        results += [_settled(f, u, i) for f, (u, i) in zip(attack_futures, pairs)]
     return results
+
+
+def _settled(future, user_task_id: str, injection_task_id: str | None) -> CaseResult:
+    """A case result, or a recorded failure.
+
+    One case raising must not lose the other several hundred. A crashed case is
+    recorded with `final_action=None`, which every metric in eval/metrics.py
+    already treats as "not stopped" -- so a failure counts against us rather
+    than silently improving the numbers.
+    """
+    try:
+        return future.result()
+    except Exception as exc:  # noqa: BLE001 - one bad case must not end the run
+        return CaseResult(
+            user_task_id,
+            injection_task_id,
+            None,
+            MelonVerdict(
+                ran=False,
+                verdict=None,
+                distance=None,
+                explanation=f"case failed: {type(exc).__name__}: {exc}",
+            ),
+        )
 
 
 def build_judge(provider: str, judge_model: str | None = None):
@@ -708,6 +742,13 @@ if __name__ == "__main__":
         "--trace-out", default=None, help="Write per-step traces as JSON Lines."
     )
     parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Cases to run concurrently. Each case is an independent episode; "
+        "the provider rate limit is the binding constraint, not the CPU.",
+    )
+    parser.add_argument(
         "--ensemble",
         default="summarize",
         help="Comma-separated masking prompts for the counterfactual test "
@@ -727,6 +768,7 @@ if __name__ == "__main__":
         judge_model=args.judge_model,
         masking_prompts=tuple(p.strip() for p in args.ensemble.split(",") if p.strip()),
         melon_model=args.melon_model,
+        max_workers=args.max_workers,
     )
 
     for result in case_results:
@@ -737,6 +779,21 @@ if __name__ == "__main__":
             f"policy={result.policy_verdict} action={result.final_action} "
             f"distance={result.melon_verdict.distance}"
         )
+
+    # A case that crashed is not a case that passed. Reporting metrics over a
+    # run whose failures are invisible is how a rate-limited run gets read as a
+    # clean one -- 54 of 60 cases died to 429s while the summary below still
+    # printed a 0% false positive rate.
+    failed = [r for r in case_results if r.final_action is None]
+    if failed:
+        print(f"\n!!! {len(failed)} of {len(case_results)} cases FAILED to run:")
+        reasons: dict[str, int] = {}
+        for result in failed:
+            reason = result.melon_verdict.explanation[:120]
+            reasons[reason] = reasons.get(reason, 0) + 1
+        for reason, count in sorted(reasons.items(), key=lambda kv: -kv[1]):
+            print(f"  {count:4}x {reason}")
+        print("Metrics below are computed over the cases that ran, not all of them.")
 
     if args.trace_out:
         import json as _json
