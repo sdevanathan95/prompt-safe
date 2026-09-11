@@ -113,10 +113,62 @@ def argument_label(
         return BOTTOM
 
     matched = [region for region in regions if _contains(region.content, text)]
-    if not matched:
-        return BOTTOM
+    whole = join_all(region.label for region in matched) if matched else BOTTOM
+    return whole.join(_embedded_identifier_label(text, regions, task_description))
 
-    return join_all(region.label for region in matched)
+
+# Identifier-shaped substrings: URLs with or without a scheme, `www.` hosts,
+# email addresses, bare domains, IBANs. Emails come before bare domains in the
+# alternation, so `bob@gmail.com` is consumed whole and its `gmail.com` is never
+# matched on its own -- a shared mail domain must not taint a legitimate
+# recipient.
+_IDENTIFIER = re.compile(
+    r"https?://[^\s'\"<>)]+"
+    r"|\bwww\.[^\s'\"<>)]+"
+    r"|\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
+    r"|\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|co|info|biz|dev|app)\b"
+    r"|\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
+    re.IGNORECASE,
+)
+_SCHEME = re.compile(r"^https?://", re.IGNORECASE)
+MIN_IDENTIFIER_LENGTH = 6
+
+
+def _identifiers(text: str) -> list[str]:
+    found: list[str] = []
+    for match in _IDENTIFIER.finditer(text):
+        ident = _SCHEME.sub("", match.group(0)).rstrip("/.,;:!?").casefold()
+        if len(ident) >= MIN_IDENTIFIER_LENGTH and ident not in found:
+            found.append(ident)
+    return found
+
+
+def _embedded_identifier_label(
+    text: str, regions: list[Region], task_description: str
+) -> Label:
+    """The label carried by identifiers *inside* a value.
+
+    `argument_label` asks whether a value appears in a region. That misses the
+    two ways an injected identifier actually reaches a call. The agent wraps it
+    in a sentence of its own ("Here's a link you might find interesting:
+    www.secure-systems-252.com"), or it reformats it (`http://` prepended to a
+    bare host). Either way the whole value appears in no region, so it was
+    classed as computed and labelled trusted -- measured letting an injected
+    phishing link through to Alice on the slack suite.
+
+    So the reverse question is asked too: does an identifier in this value
+    appear in some region? An identifier the user wrote in their own task is
+    theirs and carries nothing.
+    """
+    task = task_description.casefold()
+    label = BOTTOM
+    for ident in _identifiers(text):
+        if ident in task:
+            continue
+        for region in regions:
+            if ident in region.content.casefold():
+                label = label.join(region.label)
+    return label
 
 
 def source_regions_for_call(

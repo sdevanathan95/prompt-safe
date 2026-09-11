@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import inspect
 import re
 import sys
 from dataclasses import dataclass
@@ -56,9 +57,32 @@ def response_only_injections(suite_name: str, version: str = "v1.2.2") -> set[st
             )
         except Exception:  # noqa: BLE001, S112 - one bad task shouldn't sink the whole report
             continue
-        if ground_truth is not None and len(ground_truth) == 0:
+        if ground_truth is not None and len(ground_truth) == 0 and _scored_on_text(
+            suite.get_injection_task_by_id(task_id)
+        ):
             response_only.add(task_id)
     return response_only
+
+
+def _scored_on_text(task) -> bool:
+    """Whether an injection task's success check reads only the agent's text.
+
+    An empty ground-truth list is not enough to call an attack response-only.
+    AgentDojo leaves ground truth unwritten for several workspace attacks
+    (injection_task_6 to 13) whose `security()` checks the environment -- "is
+    there exactly one email in the trash, sent to the attacker?" Those are tool
+    attacks, and treating them as unreachable dropped 8 of workspace's 14 from
+    the tool-mediated line.
+
+    Decided from the check's source because AgentDojo carries no metadata for
+    it. When the source cannot be read the task is kept in the tool-mediated
+    denominator, which can only make the reported number worse, never better.
+    """
+    try:
+        source = inspect.getsource(type(task).security)
+    except (OSError, TypeError):
+        return False
+    return "post_environment." not in source
 
 
 @dataclass
@@ -160,7 +184,7 @@ def main(paths: list[str]) -> None:
         (suite, task) for suite in suites for task in response_only_injections(suite)
     }
 
-    print("ALL ATTACKS — including response-only, which the response channel now covers")
+    print("ALL ATTACKS — including response-only (the response channel is off by default)")
     all_lines = [
         summarize([c for c in everything if c.suite == suite], suite)
         for suite in suites

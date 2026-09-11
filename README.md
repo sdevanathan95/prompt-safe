@@ -84,6 +84,7 @@ Documentation:
 | `WALKTHROUGH.md` | the code itself — every file and function, worked examples, every model call, the limitations |
 | `GUIDE.md` | why each design choice, stage by stage |
 | `METHOD.md` | claims against the three source papers, with measurements |
+| `FAILURE_ANALYSIS.md` | every AgentDojo attack, what can make it get through, and what would fix it |
 | `middleware/trace/schema.md` | the trace contract both tracks write |
 
 ## Using it live
@@ -284,6 +285,11 @@ python -m pytest tests/ -v
 
 
 ## Where this stands, and what would move it forward
+
+> **Latest measurement:** a 64-case subset across all four suites, run with the
+> current fixes, is in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §7, along with
+> every remaining failure and its cause. The table below is the older,
+> larger two-suite run.
 
 Measured on AgentDojo with the response channel off (`eval/report.py` output):
 

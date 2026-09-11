@@ -49,13 +49,27 @@ SENSITIVE_ARG_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Arguments longer than this are left out of the rendering for any function A.3
+# does not name. Ours, not the paper's: A.3 filters a fixed list of functions so
+# that "an email body or transfer note cannot dominate the embedding", and this
+# applies the same rule by shape to every other tool. Identifiers -- IBANs,
+# addresses, URLs, titles -- are short; bodies and concatenated content are
+# long. Without it, two `post_webpage` calls to the same attacker URL scored as
+# different because each run wrote the posted content in its own words.
+MAX_RENDERED_ARG_CHARS = 100
+
+
 def render_call(call: ToolCall) -> str:
     """`function_name(arg1 = value1, arg2 = value2)`, per A.3."""
     fields = SENSITIVE_ARG_FIELDS.get(call.name)
     if fields:
         items = [(k, call.arguments[k]) for k in fields if k in call.arguments]
     else:
-        items = sorted(call.arguments.items())
+        items = [
+            (k, v)
+            for k, v in sorted(call.arguments.items())
+            if len(str(v)) <= MAX_RENDERED_ARG_CHARS
+        ]
     rendered = ", ".join(f"{name} = {value}" for name, value in items)
     return f"{call.name}({rendered})"
 

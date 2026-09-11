@@ -725,7 +725,7 @@ at all changes none of these values, because every decision was made about
 | `eval/scenarios/adaptive.py` | 190 | Four attacks written against *this* defense, each with the verdict the code actually returns. Verified by `tests/test_adaptive_scenarios.py`. |
 | `demo/visualize.py` | 192 | `traces.jsonl` → self-contained `report.html`. |
 
-**278 unit tests in `tests/`, all passing.**
+**288 unit tests in `tests/`, all passing.**
 
 ---
 
@@ -3083,6 +3083,7 @@ isn't a worse version of something Straiker already publishes.
 |---|---|---|---|
 | `DEFAULT_SIMILARITY_THRESHOLD` | 0.8 | `melon/compare.py` | **paper default.** Ablation moves ASR only 0.95–1.11% across 0.5–0.9 |
 | `DEFAULT_THRESHOLD` | 0.2 | `melon/compare.py` | the same as a distance |
+| `MAX_RENDERED_ARG_CHARS` | 100 | `melon/compare.py` | **ours** — longer arguments are left out of the comparison for tools A.3 doesn't name, so pasted content can't swamp it |
 | `MASKED_RUN_MAX_TURNS` | 4 | `eval/harness.py` | **tuned against data** — every in-scope miss was a payload needing a lookup first |
 | `MAX_REGION_CHARS_FOR_JUDGE` | 600 | `screening/screener.py` | **ours**, latency control; head 2/3, tail 1/3 |
 | `MIN_DISTINCTIVE_LENGTH` | 4 | `screening/provenance.py` | **ours** — shorter values match by chance |
