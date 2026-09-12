@@ -30,5 +30,5 @@ def test_the_run_options_are_real_parameters_not_module_constants():
     params = inspect.signature(run_suite_subset).parameters
     for name in ("response_channel", "alignment_model", "lazy_masked_run", "results_path"):
         assert name in params, name
-    assert params["response_channel"].default is False
+    assert params["response_channel"].default is True
 

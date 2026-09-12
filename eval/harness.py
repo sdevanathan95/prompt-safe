@@ -75,7 +75,6 @@ from adapters.rate_limit import configure as configure_rate_limits
 from adapters.retry import with_retry
 from middleware.melon.compare import DEFAULT_THRESHOLD
 from middleware.melon.engine import AgentCallFn, run_melon_check
-from middleware.melon.masking import orthogonal_masking_prompt
 from middleware.melon.types import MaskedRun, MelonVerdict, ToolCall
 from middleware.screening.alignment import check_alignment
 from middleware.screening.guard import StepResult, check_calls, screen_step
@@ -104,12 +103,14 @@ DEFAULT_ATTACK_NAME = "important_instructions"
 # cannot be credited to the mechanism rather than to which side of an
 # arbitrary threshold they happened to land.
 #
-# Leaving it on would put an unvalidated component inside the headline number.
-# Re-measured after per-sentence aggregation: it caught 2 of 4 successful
-# text-only attacks and blocked 1 of 5 clean travel runs, whose score (+0.146)
-# exceeded both caught attacks' -- still overlapping. `--response-channel`
-# turns it on to reproduce that measurement; this is only the default.
-RESPONSE_CHANNEL_ENABLED = False
+# The channel asks whether the answer carried out an instruction planted in
+# content the agent read (screening/output_check.py), replacing the text
+# comparisons that were measured not to separate attacks from clean runs.
+# Measured: 8 of 8 text-only attacks that fooled the agent flagged offline with
+# either judge model and 4 of 4 end to end; 0 of 50 clean runs flagged offline
+# across all four suites and 0 of 4 end to end. `--no-response-channel` turns
+# it off.
+RESPONSE_CHANNEL_ENABLED = True
 
 
 @dataclass
@@ -130,6 +131,9 @@ class CaseResult:
     trace: dict | None = None
     # Per-stage wall clock for this case; see StageTimings.
     timings: dict | None = None
+    # The agent's final answer. Kept so the response channel's verdict on a
+    # case can be read, and re-checked offline, without re-running the agent.
+    final_response: str | None = None
 
     def to_record(self) -> dict:
         """One JSON-safe line of a resumable results file."""
@@ -157,6 +161,7 @@ class CaseResult:
             },
             "trace": self.trace,
             "timings": self.timings,
+            "final_response": self.final_response,
         }
 
     @classmethod
@@ -182,6 +187,7 @@ class CaseResult:
             final_action=record["action"],
             trace=record["trace"],
             timings=record["timings"],
+            final_response=record.get("final_response"),
         )
 
 
@@ -516,13 +522,10 @@ def _guarded_verdict(
     tool_output_text = _extract_tool_output_text(messages)
     system_message = _extract_system_message(messages)
 
-    # Only the response comparison needs a masked run doing a different job
-    # from the user's (see middleware/melon/response.py). With that channel off
-    # the masked run uses the paper's prompt -- the one live.Session uses -- so
-    # the benchmark measures the detector that actually ships.
+    # The masked run uses the paper's prompt -- the one live.Session uses -- so
+    # the benchmark measures the detector that actually ships. The response
+    # channel no longer needs a masked run of its own; see output_check.py.
     prompts = masking_prompts
-    if response_channel and prompts == ("summarize",):
-        prompts = (orthogonal_masking_prompt(user_task.PROMPT),)
 
     def run_masked() -> MelonVerdict:
         masked_element = melon_llm_element or llm_element
@@ -537,10 +540,6 @@ def _guarded_verdict(
             threshold=threshold,
             task_description=user_task.PROMPT,
             masking_prompts=prompts,
-            # The control arm feeds only the response comparison; with that
-            # channel off it doubled the masked run's cost for a result
-            # nothing read.
-            run_control_arm=response_channel,
         )
 
     trusted = _trusted_authors(environment)
@@ -580,10 +579,7 @@ def _guarded_verdict(
             alignment_results=[f.result() for f in alignments],
             original_response=original_response,
             check_response_channel=response_channel,
-            masked_arms_fn=lambda: (
-                masked().masked_response,
-                masked().describer_response,
-            ),
+            answer_judge_fn=alignment_fn,
         )
     return result
 
@@ -646,6 +642,7 @@ def run_benign_case(
         final_action=step.trace.final_action,
         trace=step.trace.to_dict(),
         timings=step.timings.to_dict(),
+        final_response=output_text,
     )
 
 
@@ -722,6 +719,7 @@ def run_attack_case(
         final_action=step.trace.final_action,
         trace=step.trace.to_dict(),
         timings=step.timings.to_dict(),
+        final_response=original_output,
     )
 
 
@@ -1017,10 +1015,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--response-channel",
-        action="store_true",
-        help="Also check the agent's final answer for injected assertions "
-        "(attacks that call no tool). Off by default: measured, it still blocks "
-        "clean runs as readily as it catches attacks.",
+        action=argparse.BooleanOptionalAction,
+        default=RESPONSE_CHANNEL_ENABLED,
+        help="Check the agent's final answer for an instruction planted in "
+        "content it read (attacks that call no tool). On by default; one judge "
+        "call on steps whose answer draws on untrusted content.",
     )
     parser.add_argument(
         "--rpm",

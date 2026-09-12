@@ -679,6 +679,7 @@ at all changes none of these values, because every decision was made about
 | `provenance.py` | 192 | Traces each tool *argument value* back to its source. No LLM — pure string matching. |
 | `policy.py` | 241 | The three-way verdict. `context_label ⊑ policy_label` → safe / block / escalate. |
 | `alignment.py` | 206 | **LLM call.** "Does this call serve the user's stated task?" Can only downgrade escalate→safe. |
+| `output_check.py` | 295 | **LLM call.** The response channel: did the final answer carry out an instruction really planted in content it read, which the user didn't ask for? The quote is checked against the content mechanically. |
 | `guard.py` | 370 | The orchestrator. `screen_step()` before generation, `check_calls()` after. |
 | `declassification.py` | 150 | The user's request as a release authority, so the confidentiality axis can be enforced without blocking every legitimate send. No model call. |
 | `taint.py` | 135 | Taint that survives a write, so a payload copied into the user's own notes cannot read back as trusted. No model call. |
@@ -726,7 +727,7 @@ at all changes none of these values, because every decision was made about
 | `eval/scenarios/adaptive.py` | 190 | Four attacks written against *this* defense, each with the verdict the code actually returns. Verified by `tests/test_adaptive_scenarios.py`. |
 | `demo/visualize.py` | 192 | `traces.jsonl` → self-contained `report.html`. |
 
-**352 unit tests in `tests/`, all passing.**
+**365 unit tests in `tests/`, all passing.**
 
 ---
 
@@ -1636,6 +1637,20 @@ the policy check clears it and Stage 3 never runs. The gate is instead a free
 precondition — does the answer assert something that came from untrusted
 content and that the user never asked for?
 
+
+**Update — the response channel is now a different check, and it works on the
+cases measured.** Both attempts above compared the *wording* of the answer and
+failed for the same reason. `middleware/screening/output_check.py` asks a
+different question, following PromptArmor and Task Shield: did the answer
+carry out an instruction that was **really planted** in content the agent read
+and that the user didn't ask for? The judge must quote the instruction, and
+the quote is checked against the content mechanically — words in order, short
+gaps allowed — so an imagined instruction can't block anything. A clean
+recommendation drawn from reviews doesn't qualify: reviews aren't addressed to
+the assistant. Measured: 12 of 12 text-only attacks caught, 0 of 54 clean runs
+flagged. It's on by default, and `Session.check_answer()` offers the same
+check in production. Details in `FAILURE_ANALYSIS.md` §10.
+
 ---
 
 # Part 6 — The orchestrator: `guard.py`
@@ -2502,6 +2517,10 @@ Seven real gaps. For each: what it is, why it matters, and what would fix it.
 
 ## 13.1 The response channel — the biggest one
 
+> **Status: addressed on the cases measured.** See the update at the end of
+> §5.6: 12 of 12 text-only attacks caught, 0 of 54 clean runs flagged. The
+> analysis below explains why the earlier approaches failed.
+
 **The gap.** An attack whose goal is met by what the agent *says* calls no
 tool. Every check in Part 5 clears it, because there is no call to check.
 
@@ -3232,6 +3251,7 @@ plausible-but-wrong implementation:
 | `test_rate_limit.py` | pacing, server correction, snapshot folding, the daily-quota flag — all on a fake clock |
 | `test_harness_resume.py` | records round-trip; crashes are retried, not counted; no new case after the quota flag |
 | `test_generic_fixes.py` | one pinned case per failure class from the full run: anchoring, same destination across tools, write results kept out of the masked run, producing-call arguments carried through |
+| `test_output_check.py` | the answer check's decision rule: an imagined quote can't block; the user asking for it clears it; an escaped line break still matches; scattered words don't |
 | `test_langgraph_adapter.py`, `test_visualize.py`, `test_report.py` | edges |
 
 ---

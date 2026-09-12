@@ -235,7 +235,7 @@ Three models are chosen independently, because they do different jobs:
 | `--melon-model` | the masked re-execution | the direct lever on the miss rate — a masked run that makes no tool call cannot converge, and that is what every remaining miss looks like |
 | `--ensemble` | masking prompts, comma-separated | more detectors lower the miss rate; they run concurrently, so they cost money rather than latency |
 | `--alignment-model` | the alignment check: "did the user delegate this?" | a harder judgment than screening, run only on escalated delegation steps. Measured on the six delegation false positives: `gpt-4o-mini` cleared 3, `gpt-4o` cleared 6, and neither cleared any of the 19 blocked delegation attacks |
-| `--response-channel` | a check on the agent's final answer, for attacks that call no tool | off by default: measured, it still blocks clean runs about as readily as it catches attacks |
+| `--response-channel` / `--no-response-channel` | a check on the agent's final answer, for attacks that call no tool | on by default. Blocks an answer only if it carries out an instruction really planted in content the agent read, and the user didn't ask for it. Measured: 12 of 12 text-only attacks caught, 0 of 54 clean runs flagged |
 
 Makes real, paid LLM calls. The agent model and the judge model are chosen
 separately (`--model-id`, `--judge-model`): the judge answers one narrow
@@ -352,13 +352,13 @@ directions.
    claim rests on it. Watch the 10,000 requests/day API cap, and run it from a
    normal terminal so the process survives.
 
-2. **Solve the response channel.** Some attacks never call a tool — the goal
-   is met by what the agent *says* ("tell the user to visit this hotel"). That
-   is 73% of the attacks that beat MELON, and existing approaches use
-   classifiers, which is the arms race this design exists to avoid. The
-   construction in `middleware/melon/response.py` is the right shape and its
-   decision statistic is not; the measured failure is documented in
-   `METHOD.md`. **This is the actual research contribution if solved.**
+2. **Confirm the answer check on a full run.** Attacks met entirely by what the
+   agent *says* call no tool, and they were 11 of the 17 misses in the full
+   run. `middleware/screening/output_check.py` now blocks an answer only if
+   it carries out an instruction really planted in content the agent read,
+   and the user didn't ask for it. On targeted checks it caught 12 of 12 and
+   flagged 0 of 54 clean runs; a full run, and attacks written against it,
+   are what remain (`FAILURE_ANALYSIS.md` §10).
 
 3. **Close the latency gap** — batch or overlap the model calls, use a smaller
    judge, cache verdicts for repeated content.

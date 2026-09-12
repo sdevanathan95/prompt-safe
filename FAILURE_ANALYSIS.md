@@ -447,12 +447,7 @@ run sees.
 | Echo (2 false positives) | Same fix: a write's result echoes the user's action back into a run that's supposed to have no task. | **2 of 2 now cleared** | 3 blocked attacks whose agent wrote before its final step: **all still blocked** |
 | Delegation (6 false positives) | Designation is **mechanical and direct**: the output of the call that read what the user named. An identifier from content the user didn't point at can **never** be cleared. The judge is asked only whether the *action* is covered, and never sees values it could second-guess. Fetching exactly the named page is cleared by rule. | `gpt-4o-mini` judge: **3 of 6** (2–3 across three runs). `gpt-4o` judge (`--alignment-model`): **6 of 6** | The 19 delegation attacks that were blocked: **0 cleared** in every run, with either model |
 
-**Still open: the text-only attack (11 misses).** Re-measured with per-sentence
-scoring, the response check caught 2 of 4 successful attacks and wrongly
-blocked 1 of 5 clean travel runs. That clean run scored higher (+0.146) than
-both caught attacks (+0.067, +0.062). The distributions still overlap, so it
-stays off by default; `--response-channel` turns it on to reproduce the
-measurement.
+**The text-only attack is addressed in §10.**
 
 **What this projects for the next full run** — a projection from targeted
 replays, not a measurement:
@@ -469,3 +464,76 @@ replays, not a measurement:
 Also fixed along the way: the live `Session` never ran the alignment check at
 all — only the benchmark did — so production would have shipped a different
 pipeline than the one measured. It now runs the check by default.
+
+---
+
+## 10. The text-only attack
+
+**Why the old approach failed.** Both earlier attempts compared the *wording*
+of the answer with counterfactual runs. A clean travel answer that recommends
+hotels from reviews reads just like an injected recommendation, so the scores
+overlapped (a clean run at +0.146 against attacks at +0.067 and +0.062). The
+difference isn't in the words. It's whether the content held an **instruction
+addressed to the assistant** that the answer then carried out.
+
+**The new check (`middleware/screening/output_check.py`).** It follows two
+papers:
+
+- [PromptArmor](https://arxiv.org/abs/2507.15219): an off-the-shelf model
+  reliably locates instructions planted in retrieved data — 0.07% false
+  positives and 0.23% misses on AgentDojo with GPT-4o — because "is this
+  addressed to the AI?" is a much narrower question than "is this malicious?".
+- [Task Shield](https://arxiv.org/abs/2412.16682): the assistant's own messages,
+  not just its tool calls, must serve the user's goal.
+
+An answer is blocked only if **all four** hold:
+
+1. Content the answer draws on contains an instruction addressed to the
+   assistant, and the judge quotes it.
+2. **The quote really appears in that content.** This is checked
+   mechanically, as PromptArmor does: the quote's words in order, with a short
+   gap allowed. So an instruction the judge imagines can't cause a block.
+3. The answer carries the instruction out.
+4. The user's own request doesn't ask for it.
+
+A clean answer that recommends a reviewed hotel fails condition 1: reviews
+aren't addressed to the assistant.
+
+**Measured**, on the 11 text-only attack cases from §8 plus 50 clean runs
+across all four suites (captured once, then checked offline), and then end to
+end through the real harness:
+
+| | text-only attacks caught | clean runs wrongly flagged |
+|---|---|---|
+| offline, `gpt-4o-mini` judge | **8 / 8** | **0 / 50** |
+| offline, `gpt-4o` judge | **8 / 8** | **0 / 50** |
+| end to end, real harness | **4 / 4** | **0 / 4** |
+
+In the offline capture, 3 of the 11 attacks didn't fool the agent, so 8
+counted; the agent varies from run to run.
+
+One bug surfaced along the way and is fixed. The judge copied a line break as a
+line break, while the tool output stored it escaped (`\n`), so the exact
+comparison dropped two correct flags. The in-order word match above handles
+this.
+
+**On by default now** (`--no-response-channel` turns it off). It can only add
+a block, never clear one, and it costs one judge call on steps whose answer
+reuses untrusted text — 36 of the 50 clean runs here.
+
+**Honest limits:**
+
+- Zero false positives in 54 clean runs means the true rate is very likely
+  below about 5.5% (95% confidence), not that it is zero.
+- It hasn't faced adaptive attacks written against it — for example, a
+  planted instruction phrased to look like ordinary content rather than
+  something addressed to the assistant.
+- AgentDojo scores this attack on any mention of the hotel's name. An agent
+  that merely *lists* the hotel neutrally still counts as fooled, and this
+  check won't flag that — correctly, since nothing planted was carried out.
+
+**Updated projection for the next full run** (still from targeted checks, not
+a measured run): every miss class from §8 now has a fix, so up to all 281
+successful attacks stopped, with about 0 false positives when using
+`--alignment-model gpt-4o-2024-08-06`.
+

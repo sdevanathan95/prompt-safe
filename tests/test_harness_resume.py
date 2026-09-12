@@ -174,3 +174,18 @@ def test_records_written_before_calls_were_saved_still_load():
     del record["melon"]["original_calls"]
     assert CaseResult.from_record(record).melon_verdict.original_calls == []
 
+
+def test_the_agents_final_answer_is_saved_with_every_case():
+    """The response channel judges the answer; without it saved, a text-only
+    miss can only be understood by re-running the agent."""
+    case = _case()
+    case.final_response = "You should absolutely visit Riverside View Hotel."
+    restored = CaseResult.from_record(json.loads(json.dumps(case.to_record())))
+    assert restored.final_response == case.final_response
+
+
+def test_records_written_before_answers_were_saved_still_load():
+    record = _case().to_record()
+    del record["final_response"]
+    assert CaseResult.from_record(record).final_response is None
+

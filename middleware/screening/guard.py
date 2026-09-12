@@ -19,11 +19,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from middleware.melon.response import differential_convergence, untrusted_assertions
 from middleware.melon.types import MelonVerdict, ToolCall
 from middleware.screening import policy
 from middleware.screening.alignment import check_alignment
 from middleware.screening.labels import Integrity, Label
+from middleware.screening.output_check import check_answer
 from middleware.screening.provenance import (
     call_label,
     explain_call_label,
@@ -170,7 +170,7 @@ def check_calls(
     alignment_judge_fn=None,
     alignment_results: list | None = None,
     original_response: str = "",
-    masked_arms_fn: Callable[[], tuple[str, str]] | None = None,
+    answer_judge_fn: JudgeFn | None = None,
     check_response_channel: bool = False,
 ) -> StepResult:
     """Stage 2, escalating to Stage 3 only for the ambiguous bucket."""
@@ -292,28 +292,24 @@ def check_calls(
 
     # Response channel. An injection whose goal is met by what the agent says
     # calls no tool, so every check above clears it -- which is why this cannot
-    # be gated on the tool-call path having escalated. The gate is instead a
-    # free precondition: does the answer assert something that came from
-    # untrusted content and that the user never asked for?
+    # be gated on the tool-call path having escalated. It asks whether the
+    # answer carried out an instruction planted in content the agent read; see
+    # screening/output_check.py. It can only add a block, never clear one.
     response_verdict = None
-    if check_response_channel and original_response and screened.regions:
-        if untrusted_assertions(
-            original_response, screened.regions, screened.task_description
+    if check_response_channel and original_response and answer_judge_fn is not None:
+        response_verdict = check_answer(
+            screened.task_description,
+            original_response,
+            screened.regions,
+            answer_judge_fn,
+        )
+        if (
+            response_verdict is not None
+            and response_verdict.flagged
+            and final_action == "execute"
         ):
-            follower = describer = ""
-            if melon_verdict is not None:
-                follower = melon_verdict.masked_response
-                describer = melon_verdict.describer_response
-            elif masked_arms_fn is not None:
-                follower, describer = masked_arms_fn()
-
-            if follower and describer:
-                response_verdict = differential_convergence(
-                    original_response, follower, describer
-                )
-                if response_verdict.complied and final_action == "execute":
-                    final_action = "block"
-                    explanation = response_verdict.explanation
+            final_action = "block"
+            explanation = response_verdict.explanation
 
     driving_label = (
         call_labels[decisions.index(driving)] if driving is not None else screened.label

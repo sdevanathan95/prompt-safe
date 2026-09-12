@@ -25,6 +25,7 @@ from middleware.melon.cache import ToolCallCache
 from middleware.melon.engine import AgentCallFn, make_escalate_fn
 from middleware.melon.types import ToolCall
 from middleware.screening.guard import check_calls, screen_step
+from middleware.screening.output_check import check_answer
 from middleware.screening.policy import is_external_content
 from middleware.screening.screener import JudgeFn
 from middleware.screening.taint import TaintStore
@@ -148,6 +149,22 @@ class Session:
         rather than something `protect` can do on its own.
         """
         return self._screen().redaction.text
+
+    def check_answer(self, answer: str):
+        """Check the agent's final answer before showing it to the user.
+
+        Tool calls are gated by `protect`; an injection that works through what
+        the agent *says* never reaches one. Call this with the answer: a
+        flagged verdict means it carries out an instruction planted in content
+        the agent read, and should not be shown as is. None means the answer
+        draws on no untrusted content and there was nothing to check.
+        """
+        return check_answer(
+            self.task_description,
+            answer,
+            self._screen().regions,
+            self.alignment_judge_fn or self.judge_fn,
+        )
 
     def protect(self, fn):
         """Wrap a tool function so it only runs after clearing Stages 1-3.
