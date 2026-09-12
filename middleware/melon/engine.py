@@ -54,6 +54,7 @@ def run_melon_check(
     cache: ToolCallCache | None = None,
     masking_prompts: tuple[str, ...] = ("summarize",),
     run_control_arm: bool = False,
+    task_description: str = "",
 ) -> MelonVerdict:
     """One step of the counterfactual test.
 
@@ -120,7 +121,7 @@ def run_melon_check(
         cache.add_all(masked_calls)
         masked_calls = cache.calls
 
-    verdict = compare(original_calls, masked_calls, threshold)
+    verdict = compare(original_calls, masked_calls, threshold, task_description)
     verdict.placeholder_task = GENERAL_INSTRUCTIONS
     verdict.masked_response = "\n\n".join(masked_texts)
     verdict.describer_response = describer_text
@@ -135,6 +136,7 @@ def make_escalate_fn(
     cache: ToolCallCache | None = None,
     masking_prompts: tuple[str, ...] = ("summarize",),
     run_control_arm: bool = False,
+    task_description: str = "",
 ) -> Callable[[list[ToolCall]], MelonVerdict]:
     def escalate_fn(proposed_calls: list[ToolCall]) -> MelonVerdict:
         return run_melon_check(
@@ -146,6 +148,7 @@ def make_escalate_fn(
             cache,
             masking_prompts,
             run_control_arm,
+            task_description,
         )
 
     return escalate_fn

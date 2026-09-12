@@ -29,9 +29,9 @@ DEFAULT_ANTHROPIC_JUDGE_MODEL = "claude-haiku-4-5-20251001"
 def openai_judge(model: str = DEFAULT_OPENAI_JUDGE_MODEL, client=None) -> Callable:
     """A JudgeFn backed by OpenAI chat completions with a forced tool call."""
     if client is None:
-        import openai
+        from adapters.rate_limit import paced_openai_client
 
-        client = openai.OpenAI()
+        client = paced_openai_client()
 
     def judge_fn(messages: list[dict], tool_schema: dict) -> dict:
         response = with_retry(

@@ -25,6 +25,7 @@ from middleware.melon.cache import ToolCallCache
 from middleware.melon.engine import AgentCallFn, make_escalate_fn
 from middleware.melon.types import ToolCall
 from middleware.screening.guard import check_calls, screen_step
+from middleware.screening.policy import is_external_content
 from middleware.screening.screener import JudgeFn
 from middleware.screening.taint import TaintStore
 from middleware.trace.logger import TraceLogger
@@ -82,9 +83,15 @@ class Session:
     # leak policy, and enforcing it against integrity-only labels turns
     # every legitimate outbound email into a violation.
     enforce_confidentiality: bool = False
+    # Answers "did the user delegate this?" on escalated steps that point at a
+    # source. Defaults to judge_fn -- the benchmark runs this gate, so a live
+    # session without it would ship a different pipeline than the one measured.
+    # Worth a stronger model than the screener: it is a harder judgment and runs
+    # only on escalated delegation steps.
+    alignment_judge_fn: JudgeFn | None = None
 
     def __post_init__(self) -> None:
-        self._tool_outputs: list[tuple[str, str]] = []
+        self._tool_outputs: list[tuple[str, str, dict]] = []
         self._step = 0
         # MELON's H, accumulated across the whole session: an agent that
         # completes the real task first and acts on the injection later is
@@ -94,11 +101,13 @@ class Session:
         # user's own notes reads back as trusted -- see screening/taint.py.
         self._taint = TaintStore()
 
-    def observe(self, tool_name: str, output) -> None:
+    def observe(self, tool_name: str, output, arguments: dict | None = None) -> None:
         """Record a tool's output so later calls are screened against it.
         Call this after any tool execution the wrapped functions didn't
-        themselves perform (e.g. a read the agent issued directly)."""
-        self._tool_outputs.append((tool_name, str(output)))
+        themselves perform (e.g. a read the agent issued directly). Passing the
+        call's arguments lets the alignment check recognise a source the user
+        named -- `read_file(file_path=...)` -- when the user delegates to one."""
+        self._tool_outputs.append((tool_name, str(output), dict(arguments or {})))
 
     def _screen(self):
         """Stage 1 over everything seen so far, with laundered taint restored.
@@ -120,7 +129,7 @@ class Session:
         if restored == screened.regions:
             return screened
         return screen_step(
-            [(r.source_tool or "", r.content) for r in restored],
+            [(r.source_tool or "", r.content, dict(r.source_arguments)) for r in restored],
             self.task_description,
             self.judge_fn,
             trusted_authors=self.trusted_authors,
@@ -159,12 +168,17 @@ class Session:
             escalate_fn = None
             if self.melon_agent_call_fn is not None:
                 escalate_fn = make_escalate_fn(
+                    # What the agent read, not what its own writes returned --
+                    # see policy.is_external_content.
                     tool_output_text="\n\n".join(
-                        content for _, content in self._tool_outputs
+                        content
+                        for name, content, _ in self._tool_outputs
+                        if is_external_content(name)
                     ),
                     agent_call_fn=self.melon_agent_call_fn,
                     system_message=self.system_message,
                     cache=self._masked_call_cache,
+                    task_description=self.task_description,
                 )
 
             result = check_calls(
@@ -173,6 +187,7 @@ class Session:
                 [call],
                 escalate_fn=escalate_fn,
                 enforce_confidentiality=self.enforce_confidentiality,
+                alignment_judge_fn=self.alignment_judge_fn or self.judge_fn,
             )
             trace = result.trace
             if self.logger is not None:
@@ -198,7 +213,7 @@ class Session:
                 self.task_description,
                 screened.label,
             )
-            self.observe(fn.__name__, output)
+            self.observe(fn.__name__, output, kwargs)
             return output
 
         return wrapper

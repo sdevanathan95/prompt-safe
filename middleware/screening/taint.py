@@ -122,6 +122,7 @@ class TaintStore:
                     content=region.content,
                     label=label,
                     source_tool=region.source_tool,
+                    source_arguments=region.source_arguments,
                 )
             )
         return restored

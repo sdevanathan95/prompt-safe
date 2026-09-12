@@ -32,9 +32,9 @@ DEFAULT_LOCAL_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 @lru_cache(maxsize=1)
 def _openai_client():
-    import openai
+    from adapters.rate_limit import paced_openai_client
 
-    return openai.OpenAI()
+    return paced_openai_client()
 
 
 @lru_cache(maxsize=1)

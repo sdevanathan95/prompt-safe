@@ -145,6 +145,21 @@ def is_read_only(tool_name: str) -> bool:
     return any(name.startswith(prefix) for prefix in READ_ONLY_PREFIXES)
 
 
+def is_external_content(tool_name: str) -> bool:
+    """Whether a tool's output is content from outside, as opposed to an echo of
+    the agent's own action.
+
+    A read returns what someone else wrote; a write returns a confirmation or
+    the record the agent itself just created. The counterfactual shows the
+    masked run what the agent read, and including write results leaks the
+    user's task back into a run that is supposed to have none: measured, an
+    `update_user_info` result echoed the user's new address, the masked run
+    re-issued the update, and a legitimate step was blocked. Outbound reads
+    return a web page -- external content -- even though they are sinks.
+    """
+    return is_read_only(tool_name) or is_outbound_read(tool_name)
+
+
 # RTBAS evaluates prompt injection (integrity) and accidental leakage
 # (confidentiality) as two separate benchmarks with two separate labelings —
 # its AgentDojo table lists integrity-sensitive tools only. Enforcing both

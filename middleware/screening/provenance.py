@@ -134,7 +134,7 @@ _SCHEME = re.compile(r"^https?://", re.IGNORECASE)
 MIN_IDENTIFIER_LENGTH = 6
 
 
-def _identifiers(text: str) -> list[str]:
+def identifiers(text: str) -> list[str]:
     found: list[str] = []
     for match in _IDENTIFIER.finditer(text):
         ident = _SCHEME.sub("", match.group(0)).rstrip("/.,;:!?").casefold()
@@ -162,7 +162,7 @@ def _embedded_identifier_label(
     """
     task = task_description.casefold()
     label = BOTTOM
-    for ident in _identifiers(text):
+    for ident in identifiers(text):
         if ident in task:
             continue
         for region in regions:
@@ -238,7 +238,42 @@ def call_label(
     # leaking a balance does not carry the balance in its recipient, and
     # reading confidentiality off the arguments would miss every leak whose
     # secret sits in free text.
-    return Label(per_argument.integrity, fallback.confidentiality)
+    label = Label(per_argument.integrity, fallback.confidentiality)
+    if _anchored_in_task(arguments, task_description):
+        return label
+    # Not one value in this call came from the user's own words, so the user
+    # did not specify this action -- something the agent read did, or the
+    # agent chose it. Per-argument provenance answers where values came from,
+    # not what made the agent act, so on its own it can clear a call an
+    # injection chose using only trusted values. Measured: an injected "book
+    # the most expensive hotel in Paris" took its hotel from the trusted
+    # listing and computed its dates, every argument read as trusted, and the
+    # booking was cleared before the counterfactual ever ran. An unanchored
+    # call therefore gets the same floor as an untraceable one.
+    return Label(
+        label.join(_untraceable_label(regions, fallback)).integrity,
+        fallback.confidentiality,
+    )
+
+
+def _anchored_in_task(arguments: dict, task_description: str) -> bool:
+    """Whether the user's own request specified this call.
+
+    Either a distinctive value appears in the request, or the request names the
+    call's recipient: "email the report to Bob" specifies a send to
+    bob@corp.com as surely as typing the address would, and declassification
+    already makes that judgement with the same word-boundary rule.
+    """
+    # Imported here: declassification imports this module, so a module-level
+    # import would be circular.
+    from middleware.screening.declassification import _named_in, destinations
+
+    if any(
+        is_distinctive(value) and _contains(task_description, str(value))
+        for value in arguments.values()
+    ):
+        return True
+    return any(_named_in(task_description, d) for d in destinations(arguments))
 
 
 def explain_call_label(

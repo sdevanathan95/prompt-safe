@@ -70,7 +70,8 @@ middleware/
                visualizer reads
 adapters/      Provider adapters for the middleware's own internal calls:
                the LM judge, and the embedding model the counterfactual
-               comparison thresholds on
+               comparison thresholds on,
+               and the rate-limit pacer every model call goes through
 eval/          Benchmark harness (AgentDojo), metrics reporting,
                hand-crafted test scenarios
 demo/          Trace visualizer — renders a run as an HTML report
@@ -178,23 +179,52 @@ an otherwise fine inbox.
 
 ## Running the benchmark
 
+Run every suite in **one process** and aggregate — one suite is not a result,
+because suites differ sharply in how much externally-authored content their
+tasks read, and one process means every call draws on the same rate-limit
+budget (separate processes retrying on their own cannot share a limit; four of
+them once lost 54 of 60 cases to 429s):
+
+```
+python -m eval.harness --provider openai --suite all --max-user-tasks 999 \
+  --max-workers 2 --lazy-masked-run --results-dir results/full \
+  --alignment-model gpt-4o-2024-08-06
+python -m eval.report results/full/final_*.txt
+```
+
+For a quick look at a few cases rendered as HTML:
+
 ```
 python -m eval.harness --provider openai --suite banking \
   --max-user-tasks 8 --max-injection-tasks 3 --trace-out traces.jsonl
 python -m demo.visualize traces.jsonl -o report.html
 ```
 
-Run several suites and aggregate them — one suite is not a result, because
-suites differ sharply in how much externally-authored content their tasks
-read:
+### Rate limits, and runs longer than a day
 
-```
-for s in banking workspace travel; do
-  python -m eval.harness --provider openai --suite $s \
-    --max-user-tasks 8 --max-injection-tasks 3 > final_$s.txt
-done
-python -m eval.report final_*.txt
-```
+Every model call — the agent's own, the masked re-run, the judge, the
+embeddings — goes through `adapters/rate_limit.py`, which paces requests and
+tokens per model below the account's per-minute limits (`--rpm`, `--tpm`; the
+defaults are this project's measured `gpt-4o-mini` limits, 500 and 200,000)
+and times out a dead connection after 60 seconds. Pacing spends exactly the
+account's allowance, evenly; it does not get around the limit.
+
+`--results-dir` makes a run resumable: each case is appended as it finishes,
+and rerunning the same command skips finished cases and retries crashed ones.
+That matters because of a third limit, requests per **day**. Measured: about 10
+chat requests per case with `--lazy-masked-run`, so all ~1,046 cases (949
+attacks + 97 benign runs) need roughly 10,500 requests — just over a
+10,000/day quota. When the provider reports the daily quota nearly spent, the
+run starts no new case, prints the reset time and exits with code 3; rerun the
+same command after the reset.
+
+Note that `--rpm` and `--tpm` apply to every model; a second model with lower limits, such as `gpt-4o` for alignment, will occasionally hit a 429, which the retry absorbs.
+
+`--lazy-masked-run` runs the counterfactual only for steps that escalate:
+identical verdicts at far fewer calls, but latency numbers then reflect
+sequential execution, so take timing from a run without it. With the response
+channel off (the default), the masked run uses the paper's prompt and no
+control arm — the same configuration `live.Session` ships.
 
 Three models are chosen independently, because they do different jobs:
 
@@ -204,6 +234,8 @@ Three models are chosen independently, because they do different jobs:
 | `--judge-model` | screener + alignment gate | narrow classification; the cheap tier is enough |
 | `--melon-model` | the masked re-execution | the direct lever on the miss rate — a masked run that makes no tool call cannot converge, and that is what every remaining miss looks like |
 | `--ensemble` | masking prompts, comma-separated | more detectors lower the miss rate; they run concurrently, so they cost money rather than latency |
+| `--alignment-model` | the alignment check: "did the user delegate this?" | a harder judgment than screening, run only on escalated delegation steps. Measured on the six delegation false positives: `gpt-4o-mini` cleared 3, `gpt-4o` cleared 6, and neither cleared any of the 19 blocked delegation attacks |
+| `--response-channel` | a check on the agent's final answer, for attacks that call no tool | off by default: measured, it still blocks clean runs about as readily as it catches attacks |
 
 Makes real, paid LLM calls. The agent model and the judge model are chosen
 separately (`--model-id`, `--judge-model`): the judge answers one narrow
@@ -286,10 +318,12 @@ python -m pytest tests/ -v
 
 ## Where this stands, and what would move it forward
 
-> **Latest measurement:** a 64-case subset across all four suites, run with the
-> current fixes, is in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §7, along with
-> every remaining failure and its cause. The table below is the older,
-> larger two-suite run.
+> **Latest measurement — the full AgentDojo run:** 264 of 270 successful tool
+> attacks stopped (97.8%), 264 of 281 counting text-only attacks (94.0%), 8 of
+> 97 legitimate tasks blocked (8.2%), and zero human confirmations against 690
+> under RTBAS's design. Every remaining failure and its cause is in
+> [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §8. The table below is an older,
+> smaller two-suite run.
 
 Measured on AgentDojo with the response channel off (`eval/report.py` output):
 

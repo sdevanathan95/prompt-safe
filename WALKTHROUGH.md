@@ -712,6 +712,7 @@ at all changes none of these values, because every decision was made about
 | `judge.py` | 98 | OpenAI / Anthropic adapters for forced-tool-call model queries. |
 | `embeddings.py` | 131 | `text-embedding-3-small` + local fallback. Batched and cached. |
 | `retry.py` | 75 | Exponential backoff on 429s. Parallel masked runs blow through TPM tiers. |
+| `rate_limit.py` | 309 | Paces every OpenAI call below the account's per-minute limits, one budget per model; guards the daily quota; 60 s timeout. See §8.4. |
 | `langgraph.py` | 84 | Wraps a LangGraph tool list. No langgraph import needed. |
 
 ## `eval/`, `demo/`
@@ -725,7 +726,7 @@ at all changes none of these values, because every decision was made about
 | `eval/scenarios/adaptive.py` | 190 | Four attacks written against *this* defense, each with the verdict the code actually returns. Verified by `tests/test_adaptive_scenarios.py`. |
 | `demo/visualize.py` | 192 | `traces.jsonl` → self-contained `report.html`. |
 
-**288 unit tests in `tests/`, all passing.**
+**352 unit tests in `tests/`, all passing.**
 
 ---
 
@@ -918,6 +919,14 @@ return Label(per_argument.integrity, fallback.confidentiality)
 | `call_label(args, regions, task, fallback)` | join over arguments; integrity per-arg, confidentiality per-step |
 | `source_regions_for_call(args, regions)` | which regions the values came from — what the alignment judge is shown |
 | `explain_call_label(...)` | one human-readable line naming the offending argument |
+
+**Update — anchoring.** Per-argument provenance tracks where values came from,
+not what made the agent act, and on its own it cleared an injected hotel
+booking whose hotel came from the trusted listing and whose dates were
+computed. So a call can use its per-argument labels to clear only if it is
+**anchored in the user's request**: one of its values is in the user's words,
+or the user named its recipient ("email Bob" → `bob@corp.com`). Otherwise it
+gets the same floor as an untraceable call (`provenance._anchored_in_task`).
 
 ## 4.4 `trace/schema.py` — the output contract
 
@@ -1268,6 +1277,31 @@ in it needs escalating.
 | `check_alignment(task, name, args, source_regions, judge_fn)` | → `AlignmentResult` |
 | `AlignmentResult.clears_escalation` | serves_user_task AND user_designated_source |
 
+**Update — how the alignment check decides, after the full run.** Six
+delegation false positives showed the judge failing in two ways: it checked
+arithmetic (and got it wrong: 1,100 + 100 ruled "not 1,200"), and it refused
+the steps a task needs. The check now works like this:
+
+1. **Designation is mechanical and direct.** `designated_regions()` keeps the
+   output of the call that read what the user named — a file, URL, quoted
+   subject, sender or named author — and never what that source only points
+   to. In replay, the workspace delegation attacks arrived through files the
+   delegated email mentions, never through the email itself.
+2. **A stray identifier is never cleared.** A URL, email or IBAN from
+   untrusted content the user didn't point at blocks clearing with no model
+   call (`undesignated_identifiers`). This alone keeps 8 of the 19 blocked
+   delegation attacks blocked.
+3. **The judge is asked one question — is the *action* covered?** It sees
+   destinations and values from undesignated content; values it could
+   second-guess are elided (`_worth_judging`).
+4. **Opening exactly the named page is cleared by rule**
+   (`fetches_a_named_source`), with an exact match so a query string can't
+   smuggle data out.
+
+Measured on the recorded cases: `gpt-4o-mini` clears 3 of the 6 false
+positives, `gpt-4o` (`--alignment-model`) clears all 6, and neither clears any
+of the 19 attacks.
+
 ## 5.3 Stage 3 — The counterfactual (`middleware/melon/`)
 
 The core idea, restated: **rerun the step with the user's task removed. If the
@@ -1451,6 +1485,13 @@ Aggregating by worst-case distance would let an unmatched benign call hide an
 exactly-matched malicious one — a false negative on the case where a hijacked
 agent still looks successful to the user. That is scenario
 `injection_multi_call_partial_match` in `eval/scenarios/hand_crafted.py`.
+
+**Update — same destination, different tool.** Whole-call embeddings scored
+`post_webpage` and `send_channel_message` to the same attacker URL at 0.634, and
+the attack passed. `shared_destination()` now also counts two calls sending to
+the same URL, email or IBAN as convergence, whatever tool each used. A
+destination the user named is excluded. Across 97 recorded "safe" verdicts it
+flips 3, all attacks.
 
 ### 5.3.5 `engine.py` — running it
 
@@ -1799,6 +1840,12 @@ with session_scope(session):
 A `ContextVar` (not a module global) stays correct across threads and
 concurrent async tasks.
 
+**`Session` now runs the alignment check.** It used to skip Stage 2.5
+entirely, so production shipped a different pipeline than the one benchmarked.
+`alignment_judge_fn` defaults to `judge_fn`; pass a stronger model there.
+`observe(name, output, arguments)` records the producing call's arguments,
+which is how a source the user named is recognised.
+
 ## 7.4 `adapters/langgraph.py`
 
 There is genuinely little to adapt — LangGraph tool nodes call plain Python
@@ -1890,6 +1937,36 @@ Only transient classes retry (`RateLimitError`, `APIConnectionError`,
 `APITimeoutError`, `InternalServerError`, HTTP 408/409/429/5xx). A malformed
 request or a bad key raises immediately — retrying those just multiplies the
 same failure behind a delay.
+
+## 8.4 `rate_limit.py` — pacing, so the limit is never hit
+
+`retry.py` reacts to a 429; `rate_limit.py` prevents one. Every OpenAI call in
+the process — the agent's own (AgentDojo's `OpenAILLM` has its client swapped
+for this one by `harness._paced`), the masked run, the judge and the embeddings
+— goes through one shared client whose httpx transport clears each request
+with a `Pacer` first.
+
+- **Two token buckets per model**, requests and tokens, refilling at 90% of the
+  account's per-minute limits (`HEADROOM`), with at most 5 seconds of budget
+  sent at once (`BURST_SECONDS`), since per-minute limits can be enforced over
+  shorter slices. Both are judgment calls, stated as such in the code.
+- **Corrected by the server.** Each response's `x-ratelimit-remaining-*`
+  headers clamp the buckets down when the provider says less is left than
+  estimated. Tokens are estimated as body bytes ÷ 4, which over-counts.
+- **Dated snapshots share a budget.** The judge asks for `gpt-4o-mini`,
+  AgentDojo for `gpt-4o-mini-2024-07-18`, and the provider's 429 reads "for
+  limit gpt-4o-mini". A six-case live run first counted them as two models —
+  up to twice the real allowance — so both now fold into one bucket.
+- **The daily quota is guarded, not paced.** On this account the request
+  headers report a 10,000/day quota resetting in hours. Once fewer than
+  `DAILY_RESERVE` = 50 remain, the pacer raises a flag; the harness starts no
+  new case and exits with the reset time, and rerunning resumes.
+- **A 60-second timeout** instead of the SDK's 600, so a dead connection falls
+  into a retry instead of stalling a run for ten minutes.
+
+Measured: six live cases across banking and workspace in 34 s with no crashes,
+about 10 chat requests per case with `--lazy-masked-run`, and an identical
+rerun finished in 2 s making zero requests.
 
 ---
 
@@ -2107,7 +2184,7 @@ This is the section to read if you care about latency or cost.
 | 1 | 1 | `screener.py · screen()` | judge (cheap) | every step, **unless all regions share a label** | ~200ms |
 | 2 | 2.5 | `alignment.py · check_alignment()` | judge (cheap) | only on `escalate`, and only if `task_points_at_a_source()` passes. One per escalating call, run in parallel | ~300ms |
 | 3 | 3 | `engine.py → agent_call_fn` | masked model | only on surviving `escalate` with a sensitive call. **Up to `MASKED_RUN_MAX_TURNS = 4` sequential calls per arm**; arms parallel | ~800ms |
-| 4 | 3 | control arm (same path) | masked model | only if `run_control_arm=True`. Runs in the **same** pool as #3 | +0ms (parallel) |
+| 4 | 3 | control arm (same path) | masked model | only when the response channel is on — the harness passes `run_control_arm=RESPONSE_CHANNEL_ENABLED`. Runs in the **same** pool as #3 | +0ms (parallel) |
 | 5 | 3 | `embeddings.py · embed_many()` | embedding | once per comparison, batched | ~470ms |
 | 6 | 5.6 | `differential_convergence()` | embedding | response channel only (off) | ~470ms |
 
@@ -2273,6 +2350,14 @@ and comparing only the final round silently dropped it.
 against a **throwaway deep copy** of the environment purely so the conversation
 can continue; nothing it does is visible outside `_make_agent_call_fn`.
 
+**5. The masked run sees what the agent read, not what it wrote.**
+`policy.is_external_content` keeps reads and outbound reads, and drops the
+results of the agent's own writes. A write's result echoes the user's action
+back — measured, an `update_user_info` result carried the user's new address,
+and the masked run repeated it. On live replays this cleared both echo false
+positives and let the masked run act in all three cases where it previously
+did nothing.
+
 ## 11.3 Function map
 
 | function | does |
@@ -2285,9 +2370,13 @@ can continue; nothing it does is visible outside `_make_agent_call_fn`.
 | `_to_agentdojo_messages(dicts)` | generic masking dicts → AgentDojo typed shapes. **All framework glue lives here**, so `middleware/melon` stays agent-agnostic |
 | `_make_agent_call_fn(llm, suite, env)` | the multi-turn masked probe |
 | `_check_result(task, ...)` | mirrors AgentDojo's own ground truth (trace fast path, then the plain check) |
-| `_guarded_verdict(...)` | the concurrent Stage 1 / 2.5 / 3 arrangement (§10.3) |
+| `_guarded_verdict(...)` | the concurrent Stage 1 / 2.5 / 3 arrangement (§10.3); with `lazy_masked_run`, Stage 3 starts only on escalation |
 | `run_benign_case(...)` / `run_attack_case(...)` | one case each |
-| `run_suite_subset(...)` | the loop over user tasks × injection tasks |
+| `run_suite_subset(...)` | user tasks × injection tasks; with `results_path`, skips cases a previous run finished |
+| `_run_jobs(...)` | bounded in-flight cases, each recorded as it lands; starts no new case once the daily quota flag is up |
+| `_appender` / `_load_finished` | the resumable JSONL file; a crashed case is not "finished", so it is retried |
+| `_paced(element)` | swaps AgentDojo's bare OpenAI client for the shared paced one |
+| `_case_line(result)` | one case per line, in the format `eval/report.py` parses |
 
 ## 11.4 `eval/metrics.py` — the numbers, and why each exists
 
@@ -2360,6 +2449,12 @@ plausible-but-wrong implementation:
 ---
 
 # Part 12 — Where it actually stands
+
+> **Full AgentDojo run (all 949 attacks, 1,038 of 1,046 cases):** 264 of 270
+> successful tool attacks stopped (97.8%, above ~95% at 95% confidence),
+> 264 of 281 counting text-only attacks (94.0%), 8 of 97 legitimate tasks
+> blocked (8.2%), 0 human confirmations. Remaining failures and their causes:
+> `FAILURE_ANALYSIS.md` §8. The numbers below are from earlier, smaller runs.
 
 > **Status note.** A full four-suite re-run was attempted and did **not**
 > complete. It was defeated by the provider rate limit (500 RPM / 200k TPM on
@@ -2909,6 +3004,8 @@ cases died still printed a clean "0.0% false positive rate", because a case
 that never ran is not a case that was stopped. **Any reported number should be
 read alongside the failure count.**
 
+**Now runnable end to end.** Pacing (§8.4) and a resumable `--results-dir` replace burst-and-retry, and one `--suite all` process shares one budget. The remaining constraint is the account's daily quota: about 10 requests per case in lazy mode puts a full run at ~10,500 requests, so on a 10,000/day account it spans two days — the run stops cleanly at the quota and the same command resumes it.
+
 **2. Report intervals, not point estimates.** "50/55" needs a Wilson interval.
 Zero misses in 55 is consistent with a true rate above ~93% — say that, don't
 imply 100%.
@@ -3093,7 +3190,13 @@ isn't a worse version of something Straiker already publishes.
 | `RESPONSE_CHANNEL_ENABLED` | False | `eval/harness.py` | **deliberate** — see §5.6 |
 | `DEFAULT_ENSEMBLE` | 4 prompts | `melon/masking.py` | opt-in; **measured null result** |
 | `REDACTION_MARKER` | `◊` | `screening/redactor.py` | RTBAS verbatim |
-| `DEFAULT_MAX_ATTEMPTS` | 5 | `adapters/retry.py` | ours |
+| `DEFAULT_MAX_ATTEMPTS` | 8 | `adapters/retry.py` | ours |
+| `DEFAULT_REQUESTS_PER_MINUTE` | 500 | `adapters/rate_limit.py` | **measured** — this account's gpt-4o-mini 429 message; `--rpm` overrides |
+| `DEFAULT_TOKENS_PER_MINUTE` | 200,000 | `adapters/rate_limit.py` | **measured** — `x-ratelimit-limit-tokens`; `--tpm` overrides |
+| `HEADROOM` | 0.9 | `adapters/rate_limit.py` | ours — aim below the limit, not at it |
+| `BURST_SECONDS` | 5 | `adapters/rate_limit.py` | ours — per-minute limits can be enforced over shorter slices |
+| `REQUEST_TIMEOUT_SECONDS` | 60 | `adapters/rate_limit.py` | ours — the SDK default of 600 stalled a run |
+| `DAILY_RESERVE` | 50 | `adapters/rate_limit.py` | ours — room for in-flight cases once the daily flag goes up |
 | `DEFAULT_OPENAI_JUDGE_MODEL` | `gpt-4o-mini` | `adapters/judge.py` | cheap tier is enough |
 | `DEFAULT_ANTHROPIC_JUDGE_MODEL` | `claude-haiku-4-5` | `adapters/judge.py` | " |
 | `DEFAULT_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | `adapters/embeddings.py` | paper's generation |
@@ -3126,6 +3229,9 @@ plausible-but-wrong implementation:
 | `test_live.py` | `Blocked` means the body never ran; contextvar resolution |
 | `test_metrics*.py` | defended vs undefended utility; the tiering numbers |
 | `test_retry.py` | only transient classes retry |
+| `test_rate_limit.py` | pacing, server correction, snapshot folding, the daily-quota flag — all on a fake clock |
+| `test_harness_resume.py` | records round-trip; crashes are retried, not counted; no new case after the quota flag |
+| `test_generic_fixes.py` | one pinned case per failure class from the full run: anchoring, same destination across tools, write results kept out of the masked run, producing-call arguments carried through |
 | `test_langgraph_adapter.py`, `test_visualize.py`, `test_report.py` | edges |
 
 ---

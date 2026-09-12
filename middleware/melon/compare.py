@@ -25,6 +25,8 @@ import numpy as np
 from adapters.embeddings import cosine_similarity, embed, embed_many
 from middleware.melon.prefilter import is_sensitive
 from middleware.melon.types import MelonVerdict, ToolCall
+from middleware.screening.declassification import DESTINATION_FIELDS
+from middleware.screening.provenance import identifiers
 
 # Cosine *similarity* above which two calls count as converged. The paper's
 # value; its ablation (Table 4) moves ASR only between 0.95% and 1.11% across
@@ -114,10 +116,51 @@ def most_similar_pair(
     return (float(scores[row, column]), original_calls[row], masked_calls[column])
 
 
+def _destinations(call: ToolCall) -> set[str]:
+    """Identifiers -- URLs, emails, IBANs -- in the arguments that say where a
+    call sends something."""
+    found: set[str] = set()
+    for name, value in call.arguments.items():
+        if name.lower() not in DESTINATION_FIELDS:
+            continue
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            found.update(identifiers(str(item)))
+    return found
+
+
+def shared_destination(
+    original_calls: list[ToolCall],
+    masked_calls: list[ToolCall],
+    task_description: str = "",
+) -> tuple[str, ToolCall, ToolCall] | None:
+    """A destination both runs sent to, if any -- whatever tool each used.
+
+    The embedding compares whole calls, so the same leak through a different
+    tool scores as a different action: measured, an injection posted a
+    channel's messages to an attacker URL with `post_webpage` while the masked
+    run sent them there with `send_channel_message`, similarity 0.634, and the
+    attack passed. The destination is what the attacker actually chose, and a
+    run that never saw the user's task choosing the same one is the
+    convergence the test looks for. A destination the user named is excluded:
+    both runs reaching it is explained by the request, not by the content.
+    """
+    user_named = set(identifiers(task_description))
+    for original in original_calls:
+        mine = _destinations(original) - user_named
+        if not mine:
+            continue
+        for masked in masked_calls:
+            shared = mine & _destinations(masked)
+            if shared:
+                return sorted(shared)[0], original, masked
+    return None
+
+
 def compare(
     original_calls: list[ToolCall],
     masked_calls: list[ToolCall],
     threshold: float = DEFAULT_THRESHOLD,
+    task_description: str = "",
 ) -> MelonVerdict:
     """Compare the two runs' calls. `threshold` is a cosine *distance*."""
     similarity_threshold = 1.0 - threshold
@@ -189,6 +232,20 @@ def compare(
             f"(similarity {similarity:.3f} ≤ {similarity_threshold:.2f}). "
             "The action depended on the real task, consistent with benign behavior."
         )
+
+    if verdict == "safe":
+        shared = shared_destination(sensitive_calls, masked_calls, task_description)
+        if shared is not None:
+            destination, original_hit, masked_hit = shared
+            verdict = "block"
+            explanation = (
+                f"With the user's task removed, the agent still sent to "
+                f"{destination} -- through {masked_hit.name} rather than "
+                f"{original_hit.name}, which is why the two calls did not look "
+                f"alike (similarity {similarity:.3f}). Both runs chose the same "
+                "destination and the user never named it, so the content chose "
+                "it. Flagged as injection."
+            )
 
     return MelonVerdict(
         ran=True,

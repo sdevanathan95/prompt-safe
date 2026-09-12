@@ -89,6 +89,11 @@ class Region:
     content: str
     label: Label
     source_tool: str | None = None
+    # Arguments of the call that produced this region -- which file, URL or
+    # mailbox it was read from, as sorted (name, value) pairs so the region
+    # stays hashable. What lets `alignment.designated_regions` tell content the
+    # user pointed the agent at from content it merely came across.
+    source_arguments: tuple[tuple[str, str], ...] = ()
 
 
 def label_for_tool_output(tool_name: str) -> Label:
@@ -158,7 +163,7 @@ def split_content(content: str) -> list[str]:
 
 
 def build_regions(
-    tool_outputs: list[tuple[str, str]],
+    tool_outputs: list[tuple[str, str]] | list[tuple[str, str, dict]],
     start_index: int = 1,
     trusted_authors: frozenset[str] = frozenset(),
 ) -> list[Region]:
@@ -169,7 +174,10 @@ def build_regions(
     """
     regions: list[Region] = []
     next_index = start_index
-    for tool_name, content in tool_outputs:
+    for tool_name, content, *rest in tool_outputs:
+        arguments = tuple(
+            sorted((str(k), str(v)) for k, v in (rest[0] if rest else {}).items())
+        )
         for span in split_content(content):
             regions.append(
                 Region(
@@ -177,6 +185,7 @@ def build_regions(
                     content=span,
                     label=label_for_region(tool_name, span, trusted_authors),
                     source_tool=tool_name,
+                    source_arguments=arguments,
                 )
             )
             next_index += 1

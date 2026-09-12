@@ -32,8 +32,13 @@ decision, not a multi-step loop.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import functools
+import json
+import sys
+from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from pathlib import Path
 
 from agentdojo.agent_pipeline import AgentPipeline, PipelineConfig
 from agentdojo.agent_pipeline.base_pipeline_element import BasePipelineElement
@@ -59,6 +64,14 @@ from adapters.judge import (
     anthropic_judge,
     openai_judge,
 )
+from adapters.rate_limit import (
+    DEFAULT_REQUESTS_PER_MINUTE,
+    DEFAULT_TOKENS_PER_MINUTE,
+    paced_openai_client,
+    quota_exhausted,
+    requests_sent,
+)
+from adapters.rate_limit import configure as configure_rate_limits
 from adapters.retry import with_retry
 from middleware.melon.compare import DEFAULT_THRESHOLD
 from middleware.melon.engine import AgentCallFn, run_melon_check
@@ -66,7 +79,7 @@ from middleware.melon.masking import orthogonal_masking_prompt
 from middleware.melon.types import MaskedRun, MelonVerdict, ToolCall
 from middleware.screening.alignment import check_alignment
 from middleware.screening.guard import StepResult, check_calls, screen_step
-from middleware.screening.provenance import source_regions_for_call
+from middleware.screening.policy import is_external_content
 from middleware.screening.regions import build_regions
 
 # Provider clients read their key from the environment. Does not override a
@@ -92,7 +105,10 @@ DEFAULT_ATTACK_NAME = "important_instructions"
 # arbitrary threshold they happened to land.
 #
 # Leaving it on would put an unvalidated component inside the headline number.
-# Set True to reproduce the response-channel measurements.
+# Re-measured after per-sentence aggregation: it caught 2 of 4 successful
+# text-only attacks and blocked 1 of 5 clean travel runs, whose score (+0.146)
+# exceeded both caught attacks' -- still overlapping. `--response-channel`
+# turns it on to reproduce that measurement; this is only the default.
 RESPONSE_CHANNEL_ENABLED = False
 
 
@@ -115,6 +131,75 @@ class CaseResult:
     # Per-stage wall clock for this case; see StageTimings.
     timings: dict | None = None
 
+    def to_record(self) -> dict:
+        """One JSON-safe line of a resumable results file."""
+        verdict = self.melon_verdict
+        return {
+            "user_task": self.user_task_id,
+            "injection": self.injection_task_id,
+            "attack_succeeded": self.ground_truth_attack_succeeded,
+            "task_succeeded": self.user_task_succeeded,
+            "policy": self.policy_verdict,
+            "action": self.final_action,
+            "melon": {
+                "ran": verdict.ran,
+                "verdict": verdict.verdict,
+                "distance": verdict.distance,
+                "explanation": verdict.explanation,
+                # Saved for every case, not only escalated ones: the trace
+                # holds the calls only when Stage 3 ran, so a case Stage 2
+                # cleared -- the kind of miss that matters most -- would
+                # otherwise leave no record of what the agent actually did.
+                "original_calls": [
+                    {"name": c.name, "arguments": c.arguments}
+                    for c in verdict.original_calls
+                ],
+            },
+            "trace": self.trace,
+            "timings": self.timings,
+        }
+
+    @classmethod
+    def from_record(cls, record: dict) -> CaseResult:
+        """Inverse of `to_record`, carrying every field eval/metrics.py reads."""
+        melon = record["melon"]
+        return cls(
+            record["user_task"],
+            record["injection"],
+            record["attack_succeeded"],
+            MelonVerdict(
+                ran=melon["ran"],
+                verdict=melon["verdict"],
+                distance=melon["distance"],
+                explanation=melon["explanation"],
+                original_calls=[
+                    ToolCall(c["name"], c["arguments"])
+                    for c in melon.get("original_calls", [])
+                ],
+            ),
+            user_task_succeeded=record["task_succeeded"],
+            policy_verdict=record["policy"],
+            final_action=record["action"],
+            trace=record["trace"],
+            timings=record["timings"],
+        )
+
+
+ALL_SUITES = ("banking", "slack", "travel", "workspace")
+
+
+def _paced(element: BasePipelineElement) -> BasePipelineElement:
+    """Route an AgentDojo LLM element through the process-wide paced client.
+
+    AgentDojo builds a bare `openai.OpenAI()` per pipeline -- 600-second
+    timeout, no pacing -- so the agent's own calls would bypass the budget the
+    judge and embeddings share. Swapping the client puts every call against a
+    model into one allowance.
+    """
+    if isinstance(element, OpenAILLM):
+        element.client = paced_openai_client()
+    return element
+
 
 def build_llm_element(provider: str, model_id: str) -> BasePipelineElement:
     """An LLM element on its own, for the masked run.
@@ -136,8 +221,8 @@ def build_llm_element(provider: str, model_id: str) -> BasePipelineElement:
         system_message=None,
     )
     pipeline = AgentPipeline.from_config(config)
-    return next(
-        e for e in pipeline.elements if isinstance(e, (OpenAILLM, AnthropicLLM))
+    return _paced(
+        next(e for e in pipeline.elements if isinstance(e, (OpenAILLM, AnthropicLLM)))
     )
 
 
@@ -156,8 +241,8 @@ def build_pipeline(
         system_message=None,
     )
     pipeline = AgentPipeline.from_config(config)
-    llm_element = next(
-        e for e in pipeline.elements if isinstance(e, (OpenAILLM, AnthropicLLM))
+    llm_element = _paced(
+        next(e for e in pipeline.elements if isinstance(e, (OpenAILLM, AnthropicLLM)))
     )
     return pipeline, llm_element
 
@@ -200,8 +285,13 @@ def _extract_tool_output_text(messages) -> str:
     blocks = []
     for message in _observations_before_final_decision(messages):
         if message["role"] == "tool":
-            content = get_text_content_as_str(message["content"])
             function_name = message["tool_call"].function
+            # Only what the agent read. A write's result echoes the user's own
+            # action back into a run that is meant to have no task -- see
+            # policy.is_external_content.
+            if not is_external_content(function_name):
+                continue
+            content = get_text_content_as_str(message["content"])
             blocks.append(
                 f"{'=' * 50}\n\nfunction: {function_name}\n\n{content}\n\n{'=' * 50}"
             )
@@ -228,11 +318,17 @@ def _trusted_authors(environment) -> frozenset[str]:
     return frozenset(authors)
 
 
-def _extract_tool_outputs(messages) -> list[tuple[str, str]]:
+def _extract_tool_outputs(messages) -> list[tuple[str, str, dict]]:
     """The same tool results, kept split by originating function so the
-    screener can label and redact them per region rather than as one blob."""
+    screener can label and redact them per region rather than as one blob --
+    with the arguments of the call that produced each, which is how the
+    alignment check recognises a source the user named."""
     return [
-        (message["tool_call"].function, get_text_content_as_str(message["content"]))
+        (
+            message["tool_call"].function,
+            get_text_content_as_str(message["content"]),
+            dict(message["tool_call"].args),
+        )
         for message in messages
         if message["role"] == "tool"
     ]
@@ -394,6 +490,9 @@ def _guarded_verdict(
     step: int = 1,
     masking_prompts: tuple[str, ...] = ("summarize",),
     original_response: str = "",
+    lazy_masked_run: bool = False,
+    alignment_judge_fn=None,
+    response_channel: bool = RESPONSE_CHANNEL_ENABLED,
 ) -> StepResult:
     """Run the full tiered pipeline over one finished episode.
 
@@ -407,15 +506,22 @@ def _guarded_verdict(
     it discards. That is the right way round: the counterfactual test is the
     expensive part of the latency budget and the cheap part of the money
     budget, and a discarded call costs only money.
+
+    `lazy_masked_run` makes the other trade: the masked run starts only if the
+    step escalates. Verdicts are identical -- nothing reads the masked run
+    otherwise -- and a step that does not escalate pays for no masked calls,
+    which is what lets a full benchmark fit an account's daily request quota.
     """
     tool_outputs = _extract_tool_outputs(messages)
     tool_output_text = _extract_tool_output_text(messages)
     system_message = _extract_system_message(messages)
 
-    # The response comparison only means anything if the masked run is not
-    # doing the same job as the user; see middleware/melon/response.py.
+    # Only the response comparison needs a masked run doing a different job
+    # from the user's (see middleware/melon/response.py). With that channel off
+    # the masked run uses the paper's prompt -- the one live.Session uses -- so
+    # the benchmark measures the detector that actually ships.
     prompts = masking_prompts
-    if prompts == ("summarize",):
+    if response_channel and prompts == ("summarize",):
         prompts = (orthogonal_masking_prompt(user_task.PROMPT),)
 
     def run_masked() -> MelonVerdict:
@@ -429,8 +535,12 @@ def _guarded_verdict(
             agent_call_fn=agent_call_fn,
             system_message=system_message,
             threshold=threshold,
+            task_description=user_task.PROMPT,
             masking_prompts=prompts,
-            run_control_arm=True,
+            # The control arm feeds only the response comparison; with that
+            # channel off it doubled the masked run's cost for a result
+            # nothing read.
+            run_control_arm=response_channel,
         )
 
     trusted = _trusted_authors(environment)
@@ -438,17 +548,22 @@ def _guarded_verdict(
     # build, so they are built here rather than waited on from Stage 1.
     regions = build_regions(tool_outputs, trusted_authors=trusted)
 
+    alignment_fn = alignment_judge_fn or judge_fn
+
     def align(call: ToolCall):
         return check_alignment(
             user_task.PROMPT,
             call.name,
             call.arguments,
-            source_regions_for_call(call.arguments, regions),
-            judge_fn,
+            regions,
+            alignment_fn,
         )
 
     with ThreadPoolExecutor(max_workers=2 + len(original_calls)) as pool:
-        speculative = pool.submit(run_masked)
+        if lazy_masked_run:
+            masked = functools.cache(run_masked)
+        else:
+            masked = pool.submit(run_masked).result
         alignments = [pool.submit(align, call) for call in original_calls]
         screened = screen_step(
             tool_outputs,
@@ -460,14 +575,14 @@ def _guarded_verdict(
             step,
             screened,
             original_calls,
-            escalate_fn=lambda calls: speculative.result(),
-            alignment_judge_fn=judge_fn,
+            escalate_fn=lambda calls: masked(),
+            alignment_judge_fn=alignment_fn,
             alignment_results=[f.result() for f in alignments],
             original_response=original_response,
-            check_response_channel=RESPONSE_CHANNEL_ENABLED,
+            check_response_channel=response_channel,
             masked_arms_fn=lambda: (
-                speculative.result().masked_response,
-                speculative.result().describer_response,
+                masked().masked_response,
+                masked().describer_response,
             ),
         )
     return result
@@ -482,6 +597,9 @@ def run_benign_case(
     threshold: float = DEFAULT_THRESHOLD,
     masking_prompts: tuple[str, ...] = ("summarize",),
     melon_llm_element: BasePipelineElement | None = None,
+    lazy_masked_run: bool = False,
+    alignment_judge_fn=None,
+    response_channel: bool = RESPONSE_CHANNEL_ENABLED,
 ) -> CaseResult:
     environment = suite.load_and_inject_default_environment({})
     pre_environment = environment.model_copy(deep=True)
@@ -514,6 +632,9 @@ def run_benign_case(
         threshold,
         masking_prompts=masking_prompts,
         original_response=output_text,
+        lazy_masked_run=lazy_masked_run,
+        alignment_judge_fn=alignment_judge_fn,
+        response_channel=response_channel,
     )
     return CaseResult(
         user_task.ID,
@@ -539,6 +660,9 @@ def run_attack_case(
     threshold: float = DEFAULT_THRESHOLD,
     masking_prompts: tuple[str, ...] = ("summarize",),
     melon_llm_element: BasePipelineElement | None = None,
+    lazy_masked_run: bool = False,
+    alignment_judge_fn=None,
+    response_channel: bool = RESPONSE_CHANNEL_ENABLED,
 ) -> CaseResult:
     injection_task = suite.get_injection_task_by_id(injection_task_id)
     injections = attack.attack(user_task, injection_task)
@@ -584,6 +708,9 @@ def run_attack_case(
         threshold,
         masking_prompts=masking_prompts,
         original_response=original_output,
+        lazy_masked_run=lazy_masked_run,
+        alignment_judge_fn=alignment_judge_fn,
+        response_channel=response_channel,
     )
     return CaseResult(
         user_task.ID,
@@ -623,6 +750,10 @@ def run_suite_subset(
     masking_prompts: tuple[str, ...] = ("summarize",),
     melon_model: str | None = None,
     max_workers: int = 1,
+    lazy_masked_run: bool = False,
+    results_path: Path | None = None,
+    alignment_model: str | None = None,
+    response_channel: bool = RESPONSE_CHANNEL_ENABLED,
 ) -> list[CaseResult]:
     """Runs the benign case plus one attack per injection task (capped at
     `max_injection_tasks` if given — a suite typically has more than one)
@@ -636,6 +767,10 @@ def run_suite_subset(
     pipeline, llm_element = build_pipeline(provider, model_id)
     attack = load_attack(attack_name, suite, pipeline)
     judge_fn = build_judge(provider, judge_model)
+    # A separate model for the alignment gate, if asked: a harder judgment than
+    # screening, and run only on escalated delegation steps, so a stronger
+    # model there costs little.
+    alignment_fn = build_judge(provider, alignment_model) if alignment_model else None
     melon_llm_element = (
         build_llm_element(provider, melon_model) if melon_model else None
     )
@@ -644,9 +779,8 @@ def run_suite_subset(
     injection_task_ids = list(suite.injection_tasks.keys())[:max_injection_tasks]
 
     # Each case is an independent episode against its own environment copy, so
-    # they parallelize cleanly. Sequentially a full suite is hours of waiting on
-    # network round trips; the provider rate limit, not the CPU, is the binding
-    # constraint, and adapters.retry already absorbs a 429 as a pause.
+    # they parallelize cleanly. The provider rate limit, not the CPU, is the
+    # binding constraint; adapters.rate_limit paces every call against it.
     def benign(user_task_id: str) -> CaseResult:
         return run_benign_case(
             pipeline,
@@ -657,6 +791,9 @@ def run_suite_subset(
             threshold,
             masking_prompts,
             melon_llm_element,
+            lazy_masked_run=lazy_masked_run,
+            alignment_judge_fn=alignment_fn,
+            response_channel=response_channel,
         )
 
     def attacked(pair: tuple[str, str]) -> CaseResult:
@@ -672,18 +809,114 @@ def run_suite_subset(
             threshold,
             masking_prompts,
             melon_llm_element,
+            lazy_masked_run=lazy_masked_run,
+            alignment_judge_fn=alignment_fn,
+            response_channel=response_channel,
         )
 
     pairs = [(u, i) for u in user_task_ids for i in injection_task_ids]
-    if max_workers <= 1:
-        return [benign(u) for u in user_task_ids] + [attacked(p) for p in pairs]
+    keys: list[tuple[str, str | None]] = [(u, None) for u in user_task_ids] + pairs
+    finished = _load_finished(results_path) if results_path else {}
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        benign_futures = [pool.submit(benign, u) for u in user_task_ids]
-        attack_futures = [pool.submit(attacked, p) for p in pairs]
-        results = [_settled(f, u, None) for f, u in zip(benign_futures, user_task_ids)]
-        results += [_settled(f, u, i) for f, (u, i) in zip(attack_futures, pairs)]
+    def job(key: tuple[str, str | None]) -> CaseResult:
+        user_task_id, injection_task_id = key
+        if injection_task_id is None:
+            return benign(user_task_id)
+        return attacked((user_task_id, injection_task_id))
+
+    todo = [key for key in keys if key not in finished]
+    fresh = _run_jobs(todo, job, max_workers, _appender(results_path))
+    # Suite order rather than completion order, so repeated runs read the same.
+    # Keys absent from both were never started: the daily quota ran out first.
+    return [
+        finished.get(key) or fresh[key]
+        for key in keys
+        if key in finished or key in fresh
+    ]
+
+
+def _run_jobs(
+    keys: list[tuple[str, str | None]],
+    job: Callable[[tuple[str, str | None]], CaseResult],
+    max_workers: int,
+    record: Callable[[CaseResult], None],
+    should_stop: Callable[[], object] = quota_exhausted,
+) -> dict[tuple[str, str | None], CaseResult]:
+    """Run cases with a bounded number in flight, recording each as it lands.
+
+    Cases are submitted as slots free up rather than all at once, so once the
+    daily quota is nearly spent no further case starts. The ones already
+    running finish inside the quota's reserve, and a resumed run picks up
+    exactly the cases that never started.
+    """
+    results: dict[tuple[str, str | None], CaseResult] = {}
+    queue = iter(keys)
+    workers = max(1, max_workers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        running = {}
+
+        def top_up() -> None:
+            while len(running) < workers and should_stop() is None:
+                key = next(queue, None)
+                if key is None:
+                    return
+                running[pool.submit(job, key)] = key
+
+        top_up()
+        while running:
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                key = running.pop(future)
+                result = _settled(future, *key)
+                results[key] = result
+                record(result)
+            top_up()
     return results
+
+
+def _appender(path: Path | None) -> Callable[[CaseResult], None]:
+    """Append each finished case to `path` the moment it lands, so a run killed
+    mid-way loses at most the cases still in flight. Called only from
+    `_run_jobs`'s own thread, so appends never interleave."""
+    if path is None:
+        return lambda _result: None
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record(result: CaseResult) -> None:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(result.to_record(), default=str) + "\n")
+
+    return record
+
+
+def _load_finished(path: Path) -> dict[tuple[str, str | None], CaseResult]:
+    """Cases an earlier run already completed, keyed (user_task, injection).
+
+    A crashed case is not finished: it is left out so the resumed run tries it
+    again. A partial last line from a run killed mid-write is skipped.
+    """
+    finished: dict[tuple[str, str | None], CaseResult] = {}
+    if not path.exists():
+        return finished
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            result = CaseResult.from_record(json.loads(line))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if result.final_action is not None:
+            finished[(result.user_task_id, result.injection_task_id)] = result
+    return finished
+
+
+def _case_line(result: CaseResult) -> str:
+    """One case per line, in the format eval/report.py parses."""
+    return (
+        f"{result.user_task_id} injection={result.injection_task_id} "
+        f"attack_succeeded={result.ground_truth_attack_succeeded} "
+        f"task_succeeded={result.user_task_succeeded} "
+        f"policy={result.policy_verdict} action={result.final_action} "
+        f"distance={result.melon_verdict.distance}"
+    )
 
 
 def _settled(future, user_task_id: str, injection_task_id: str | None) -> CaseResult:
@@ -726,7 +959,12 @@ if __name__ == "__main__":
         description="Run a capped AgentDojo subset through the MELON check."
     )
     parser.add_argument("--provider", choices=["openai", "anthropic"], required=True)
-    parser.add_argument("--suite", default="workspace")
+    parser.add_argument(
+        "--suite",
+        default="workspace",
+        help="A suite name, a comma-separated list, or 'all'. Several suites run "
+        "in one process so they share one rate-limit budget.",
+    )
     parser.add_argument("--benchmark-version", default="v1.2.2")
     parser.add_argument("--max-user-tasks", type=int, default=3)
     parser.add_argument("--max-injection-tasks", type=int, default=None)
@@ -755,30 +993,90 @@ if __name__ == "__main__":
         "(summarize,sentiment,grammar,translate). More detectors cost one "
         "extra model call each per escalated step and lower the miss rate.",
     )
-    args = parser.parse_args()
-
-    case_results = run_suite_subset(
-        provider=args.provider,
-        suite_name=args.suite,
-        benchmark_version=args.benchmark_version,
-        max_user_tasks=args.max_user_tasks,
-        attack_name=args.attack,
-        model_id=args.model_id,
-        max_injection_tasks=args.max_injection_tasks,
-        judge_model=args.judge_model,
-        masking_prompts=tuple(p.strip() for p in args.ensemble.split(",") if p.strip()),
-        melon_model=args.melon_model,
-        max_workers=args.max_workers,
+    parser.add_argument(
+        "--results-dir",
+        default=None,
+        help="Append each finished case to DIR/cases_<suite>.jsonl as it lands "
+        "and write DIR/final_<suite>.txt for eval.report. Rerunning with the "
+        "same directory skips finished cases, so an interrupted or "
+        "quota-stopped run resumes where it stopped.",
     )
+    parser.add_argument(
+        "--lazy-masked-run",
+        action="store_true",
+        help="Run the counterfactual re-execution only for steps that escalate. "
+        "Identical verdicts at a fraction of the model calls; latency numbers "
+        "then reflect sequential rather than speculative execution.",
+    )
+    parser.add_argument(
+        "--alignment-model",
+        default=None,
+        help="Model for the alignment gate (did the user delegate this?). "
+        "Defaults to --judge-model. A harder judgment than screening, run only "
+        "on escalated delegation steps, so a stronger model here is cheap.",
+    )
+    parser.add_argument(
+        "--response-channel",
+        action="store_true",
+        help="Also check the agent's final answer for injected assertions "
+        "(attacks that call no tool). Off by default: measured, it still blocks "
+        "clean runs as readily as it catches attacks.",
+    )
+    parser.add_argument(
+        "--rpm",
+        type=int,
+        default=DEFAULT_REQUESTS_PER_MINUTE,
+        help="This account's requests-per-minute limit for the model.",
+    )
+    parser.add_argument(
+        "--tpm",
+        type=int,
+        default=DEFAULT_TOKENS_PER_MINUTE,
+        help="This account's tokens-per-minute limit for the model.",
+    )
+    args = parser.parse_args()
+    configure_rate_limits(args.rpm, args.tpm)
 
-    for result in case_results:
-        print(
-            f"{result.user_task_id} injection={result.injection_task_id} "
-            f"attack_succeeded={result.ground_truth_attack_succeeded} "
-            f"task_succeeded={result.user_task_succeeded} "
-            f"policy={result.policy_verdict} action={result.final_action} "
-            f"distance={result.melon_verdict.distance}"
+    suites = (
+        list(ALL_SUITES)
+        if args.suite == "all"
+        else [name.strip() for name in args.suite.split(",") if name.strip()]
+    )
+    results_dir = Path(args.results_dir) if args.results_dir else None
+
+    case_results: list[CaseResult] = []
+    for suite_name in suites:
+        suite_results = run_suite_subset(
+            provider=args.provider,
+            suite_name=suite_name,
+            benchmark_version=args.benchmark_version,
+            max_user_tasks=args.max_user_tasks,
+            attack_name=args.attack,
+            model_id=args.model_id,
+            max_injection_tasks=args.max_injection_tasks,
+            judge_model=args.judge_model,
+            masking_prompts=tuple(
+                p.strip() for p in args.ensemble.split(",") if p.strip()
+            ),
+            melon_model=args.melon_model,
+            max_workers=args.max_workers,
+            lazy_masked_run=args.lazy_masked_run,
+            alignment_model=args.alignment_model,
+            response_channel=args.response_channel,
+            results_path=(
+                results_dir / f"cases_{suite_name}.jsonl" if results_dir else None
+            ),
         )
+        lines = [_case_line(result) for result in suite_results]
+        print(f"=== {suite_name}: {len(suite_results)} cases ===")
+        print("\n".join(lines))
+        if results_dir:
+            (results_dir / f"final_{suite_name}.txt").write_text(
+                "\n".join(lines) + "\n", encoding="utf-8"
+            )
+        case_results.extend(suite_results)
+        if quota_exhausted() is not None:
+            break
 
     # A case that crashed is not a case that passed. Reporting metrics over a
     # run whose failures are invisible is how a rate-limited run gets read as a
@@ -867,3 +1165,18 @@ if __name__ == "__main__":
     print(f"stage 2 policy:             {ms(report.mean_policy_ms)}")
     print(f"stage 3 (escalated only):   {ms(report.mean_melon_ms_when_escalated)}")
     print(f"total per step:             {ms(report.mean_total_ms)}")
+
+    print()
+    print("--- model requests this run ---")
+    for model, count in sorted(requests_sent().items()):
+        print(f"{model:36} {count}")
+
+    stopped = quota_exhausted()
+    if stopped is not None:
+        model, resets_in = stopped
+        print(
+            f"\nSTOPPED EARLY: the daily request quota for {model} is nearly "
+            f"spent (resets in {resets_in}). Rerun the same command after the "
+            "reset; finished cases are skipped."
+        )
+        sys.exit(3)

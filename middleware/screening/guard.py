@@ -27,7 +27,6 @@ from middleware.screening.labels import Integrity, Label
 from middleware.screening.provenance import (
     call_label,
     explain_call_label,
-    source_regions_for_call,
 )
 from middleware.screening.redactor import RedactionResult, redact
 from middleware.screening.regions import Region, build_regions, labels_by_id
@@ -224,7 +223,7 @@ def check_calls(
                 screened.task_description,
                 call.name,
                 call.arguments,
-                source_regions_for_call(call.arguments, screened.regions),
+                screened.regions,
                 alignment_judge_fn,
             )
 

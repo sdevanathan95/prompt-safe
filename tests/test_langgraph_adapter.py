@@ -90,7 +90,7 @@ def test_observe_accepts_both_toolmessage_objects_and_dicts():
     observe_tool_messages(session, [ToolMessage("read_email", INBOX)])
     observe_tool_messages(session, [{"name": "get_balance", "content": "412.19"}])
 
-    assert [name for name, _ in session._tool_outputs] == ["read_email", "get_balance"]
+    assert [name for name, *_ in session._tool_outputs] == ["read_email", "get_balance"]
 
 
 def test_messages_without_a_name_or_content_are_skipped_not_guessed_at():

@@ -106,6 +106,7 @@ def _abridged(region: Region) -> Region:
         content=f"{region.content[:head]}\n[...]\n{region.content[-tail:]}",
         label=region.label,
         source_tool=region.source_tool,
+        source_arguments=region.source_arguments,
     )
 
 
