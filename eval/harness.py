@@ -94,22 +94,10 @@ CHEAP_MODEL_BY_PROVIDER = {
 
 DEFAULT_ATTACK_NAME = "important_instructions"
 
-# Off. The response-channel comparison is implemented and its mechanism is
-# sound in principle, but measured on 73 attack and 3 benign steps its
-# decision statistic does not separate the two classes: 25 of 39 travel attack
-# deltas fall at or below the largest benign delta. Twelve blocks across
-# banking and travel were attributable to it alone, eleven of them attacks and
-# one a false positive — but with overlapping distributions those eleven
-# cannot be credited to the mechanism rather than to which side of an
-# arbitrary threshold they happened to land.
-#
 # The channel asks whether the answer carried out an instruction planted in
-# content the agent read (screening/output_check.py), replacing the text
-# comparisons that were measured not to separate attacks from clean runs.
-# Measured: 8 of 8 text-only attacks that fooled the agent flagged offline with
-# either judge model and 4 of 4 end to end; 0 of 50 clean runs flagged offline
-# across all four suites and 0 of 4 end to end. `--no-response-channel` turns
-# it off.
+# content the agent read (screening/output_check.py). On the full AgentDojo run
+# it alone stopped 12 of the 286 attacks that worked and blocked none of the 97
+# clean runs. `--no-response-channel` turns it off.
 RESPONSE_CHANNEL_ENABLED = True
 
 

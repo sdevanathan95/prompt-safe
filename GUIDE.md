@@ -1003,6 +1003,12 @@ with attacks the base model ignored anyway.
 
 ### 8.2 Where it stands
 
+> **Full AgentDojo run, all 1,046 cases** ([FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md)
+> §11): 284 of 286 successful attacks stopped (99.3%), 1 of 97 legitimate
+> tasks blocked (1.0%), and 0 human confirmations against 742 under RTBAS's
+> design. The rest of this section is the earlier two-suite run, kept for
+> comparison.
+
 ```
 banking   n=80    37/37 prevention (100%)     0/8   false positives
 travel    n=64    13/18 prevention (72.2%)    0/8   false positives
@@ -1017,13 +1023,10 @@ Latency: ~1.3s added on benign traffic, more when Stage 3 fires.
 
 **Caveats you should carry with those numbers:**
 
-- Only 144 of AgentDojo's cases are covered. **slack and workspace have no
-  current end-to-end result.**
-- The current working tree (outbound-read sinks, the alignment pre-check) has
-  **not been re-benchmarked since the merge**. Its behaviour is pinned by unit
-  tests — 241 pass — but the table above predates it. The outbound-read change
-  addresses six of nine known misses on one suite, and that expectation is
-  unverified on this tree.
+- Only 144 of AgentDojo's cases were covered, and slack and workspace had no
+  end-to-end result; the full run in the note above covers all four suites.
+- The table predates later pipeline changes (outbound-read sinks, the
+  alignment check); the full run above measures the current tree.
 - Zero misses in 55 is statistically consistent with a true rate "somewhere
   above ~93%". It is not evidence of 100%.
 

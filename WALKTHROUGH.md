@@ -594,8 +594,8 @@ on an escalated step.
    failed its measurement; repeating that is the error to avoid.
 2. `propose_fn` requires re-running the agent's own decision against a subset
    of regions. `Session` holds `melon_agent_call_fn`, which is close to the
-   right shape, so this is buildable — but turning it on should follow live
-   AgentDojo numbers, which §14.1's rate-limit ceiling has so far prevented.
+   right shape, so this is buildable — but turning it on should follow a live
+   AgentDojo run with it enabled, which hasn't been done yet.
 
 ---
 
@@ -727,7 +727,7 @@ at all changes none of these values, because every decision was made about
 | `eval/scenarios/adaptive.py` | 190 | Four attacks written against *this* defense, each with the verdict the code actually returns. Verified by `tests/test_adaptive_scenarios.py`. |
 | `demo/visualize.py` | 192 | `traces.jsonl` → self-contained `report.html`. |
 
-**365 unit tests in `tests/`, all passing.**
+**367 unit tests in `tests/`, all passing.**
 
 ---
 
@@ -1733,8 +1733,9 @@ def _resolve_escalation(melon_verdict, driving):
                         needs a person."
 ```
 
-**Step 5 — the response channel** (off by default), gated on its own free
-precondition rather than on the tool-call path.
+**Step 5 — the response channel** (`check_response_channel`, off unless the
+caller turns it on; the benchmark harness does by default), gated on its own
+free precondition rather than on the tool-call path.
 
 **Step 6 — build the `StepTrace`**, appending `explain_call_label(...)` to the
 explanation for any non-safe verdict, so the trace names the specific argument
@@ -2465,20 +2466,17 @@ plausible-but-wrong implementation:
 
 # Part 12 — Where it actually stands
 
-> **Full AgentDojo run (all 949 attacks, 1,038 of 1,046 cases):** 264 of 270
-> successful tool attacks stopped (97.8%, above ~95% at 95% confidence),
-> 264 of 281 counting text-only attacks (94.0%), 8 of 97 legitimate tasks
-> blocked (8.2%), 0 human confirmations. Remaining failures and their causes:
-> `FAILURE_ANALYSIS.md` §8. The numbers below are from earlier, smaller runs.
+> **Full AgentDojo run (all 1,046 cases):** 284 of 286 successful attacks
+> stopped (99.3%, above ~97.5% at 95% confidence) — 273 of 275 tool attacks
+> and 11 of 11 text-only — 1 of 97 legitimate tasks blocked (1.0%), 0 human
+> confirmations. Remaining failures and their causes: `FAILURE_ANALYSIS.md`
+> §11 (the previous full run is §8). The numbers below are from earlier,
+> smaller runs.
 
-> **Status note.** A full four-suite re-run was attempted and did **not**
-> complete. It was defeated by the provider rate limit (500 RPM / 200k TPM on
-> `gpt-4o-mini`), not by wall clock: a four-process configuration lost 43-56 of
-> 60 cases per suite to 429s, and a single-process retry-throttled run stalled
-> rather than finishing. The tooling to do it now exists (`--max-workers`,
-> hardened retry, a failure census) but **the numbers below are still the
-> earlier partial measurement** and slack/workspace still have no end-to-end
-> result. See §14.1 for what the ceiling actually implies.
+> **Status note.** Full four-suite runs now finish in one process: the pacer in
+> `adapters/rate_limit.py` (§8.4) keeps requests under the provider's
+> per-minute and daily limits, and a stopped run resumes where it left off
+> (`--results-dir`). The table below is the earlier two-suite measurement.
 
 Measured on AgentDojo, response channel off:
 
@@ -2648,7 +2646,7 @@ agent in those tests is simulated. That makes it a mechanism result: it shows
 the construction does what it claims, and says nothing about how a real model
 behaves. §5.6's response channel passed its mechanism tests and then failed its
 measurement, which is exactly the error to avoid repeating. Turning this on
-needs live AgentDojo numbers — blocked on §14.1's rate-limit ceiling.
+needs an AgentDojo run with it enabled, which hasn't been done yet.
 
 ## 13.3 The screening judge is itself injectable — narrower than it looks, and now closed
 
@@ -2937,8 +2935,8 @@ and generic mailboxes (`info@`, `admin@`, `support@`) are named explicitly
 rather than inferred from length.
 
 **Still open:** the default remains `False`. Flipping it should follow an
-AgentDojo run with the axis on, which the rate-limit ceiling in §14.1 has so
-far prevented. Nine tests in `tests/test_declassification.py`.
+AgentDojo run with the axis on; the full runs so far used the default. Nine
+tests in `tests/test_declassification.py`.
 
 ## 13.7 The thresholds are inherited, not calibrated
 
@@ -2992,11 +2990,10 @@ transcript. **Each one you find and state makes the work stronger, not weaker.**
 
 ## Engineering — no new ideas required
 
-**1. Run all 949 security cases.** This is compute, not research, and **every
-claim rests on it.**
-
-Two things had to be fixed before a full run was even possible, and both are
-now in the tree:
+**1. Run all 949 security cases — done.** Two full runs have completed
+(`FAILURE_ANALYSIS.md` §8 and §11); the second ran all 1,046 cases in one
+attempt, paced by `adapters/rate_limit.py` (§8.4) under the account's
+per-minute and daily limits. Getting there took these fixes, all in the tree:
 
 - **`run_suite_subset` was sequential.** Cases are independent episodes against
   their own environment copies, so they parallelize cleanly. `--max-workers`
@@ -3174,15 +3171,17 @@ from the trace alone** — that's what `schema.md` requires by storing both side
 of the comparison rather than just the outcome. For audit, incident review, or
 disputing a block, that's a different category of artifact.
 
-**3. The confirmation result.** 64 → 0. **Neither source paper measures this**,
-and it isn't a metric commercial products report either — it's specific to
+**3. The confirmation result.** 742 → 0 on the full AgentDojo run (64 → 0 on
+the earlier two-suite run). **Neither source paper measures this**, and it
+isn't a metric commercial products report either — it's specific to
 composing an IFC layer with a causal resolver. It is the one number here that
 isn't a worse version of something Straiker already publishes.
 
 ## 15.5 What would make the comparison meaningful
 
-- Run all 949 cases and report Wilson intervals (§14.1–2). Then "above 93%"
-  becomes a number that can actually be set against 98.1%.
+- **Done:** all 949 attack cases, with Wilson intervals (`FAILURE_ANALYSIS.md`
+  §11). 284 of 286 stopped puts the lower bound at 97.5% — a number that can
+  now be set against 98.1%, close to it but not shown to beat it.
 - Close the latency gap to the same order of magnitude (§14.3).
 - Report cost per protected step; Straiker doesn't publish theirs either, and a
   self-hosted causal test has a very different cost curve from a hosted

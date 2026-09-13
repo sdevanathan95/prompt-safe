@@ -318,12 +318,12 @@ python -m pytest tests/ -v
 
 ## Where this stands, and what would move it forward
 
-> **Latest measurement — the full AgentDojo run:** 264 of 270 successful tool
-> attacks stopped (97.8%), 264 of 281 counting text-only attacks (94.0%), 8 of
-> 97 legitimate tasks blocked (8.2%), and zero human confirmations against 690
-> under RTBAS's design. Every remaining failure and its cause is in
-> [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §8. The table below is an older,
-> smaller two-suite run.
+> **Latest measurement — the full AgentDojo run, all 1,046 cases:** 284 of 286
+> successful attacks stopped (99.3%; 273 of 275 tool attacks and 11 of 11
+> text-only), 1 of 97 legitimate tasks blocked (1.0%), and zero human
+> confirmations against 742 under RTBAS's design. Every remaining failure and
+> its cause is in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §11. The table
+> below is an older, smaller two-suite run.
 
 Measured on AgentDojo with the response channel off (`eval/report.py` output):
 
@@ -338,35 +338,37 @@ Zero false positives across 16 benign runs, and zero human confirmations
 against the 64 that RTBAS's own design would have raised.
 
 Against Straiker's published figures (98.4% accuracy, 1.2% false positives,
-<300ms): **this cannot currently claim to be better.** Zero misses in 55 is
-only statistically consistent with "above roughly 93%" — it does not
-demonstrate better than their 99.6%. And at ~1.3s on benign traffic it is
-about 4x slower. Their numbers are self-reported on an undisclosed test set
-and these are on a public benchmark, so the comparison is weak in both
-directions.
+<300ms): **this still cannot claim to be better.** On the full run, 284 of 286
+attacks stopped is statistically consistent with anything above roughly 97.5%
+— it does not demonstrate better than their 99.6%. One false positive in 97
+(1.0%) is in line with their 1.2%, but its upper bound is 5.6%. And at about
+10 s per step on the full run (lazy mode, with 71% of cases escalating to a
+masked run) it is far slower. Their numbers are self-reported on an
+undisclosed test set and these are on a public benchmark, so the comparison
+is weak in both directions.
 
 ### What to work on, highest value first
 
-1. **Run all 949 security cases.** Only 144 are measured, and two of the four
-   suites have no current result. This is compute, not research, and every
-   claim rests on it. Watch the 10,000 requests/day API cap, and run it from a
-   normal terminal so the process survives.
+1. **Make the call comparison destination-aware.** On the full run, 25
+   legitimate calls inside attacked episodes were blocked, 21 of them because
+   the embedding can't tell two calls of the same tool apart when only the
+   destination differs (an IBAN one digit away from the attacker's scores
+   0.939). Treat different destinations as different actions unless both runs
+   wrote the same content, and re-score that offline on the stored calls of
+   all 1,046 cases before adopting it (`FAILURE_ANALYSIS.md` §11).
 
-2. **Confirm the answer check on a full run.** Attacks met entirely by what the
-   agent *says* call no tool, and they were 11 of the 17 misses in the full
-   run. `middleware/screening/output_check.py` now blocks an answer only if
-   it carries out an instruction really planted in content the agent read,
-   and the user didn't ask for it. On targeted checks it caught 12 of 12 and
-   flagged 0 of 54 clean runs; a full run, and attacks written against it,
-   are what remain (`FAILURE_ANALYSIS.md` §10).
+2. **Stop relying on one masked sample.** Both remaining misses are the masked
+   run making no tool call at all, so the counterfactual test read the
+   injected action as task-driven. Several masked samples per escalation is
+   one option, at a latency cost.
 
 3. **Close the latency gap** — batch or overlap the model calls, use a smaller
    judge, cache verdicts for repeated content.
 
 4. **Attack this system deliberately.** Every attack tested so far comes from
-   a fixed script. Adaptive attacks aimed at the judge or at the masked run
-   are untested, and a paper that reports them is far stronger than one that
-   does not.
+   a fixed script. Adaptive attacks aimed at the judge, the answer check or
+   the masked run are untested, and a paper that reports them is far stronger
+   than one that does not.
 
 5. **Add a second benchmark** (InjecAgent) so no result is AgentDojo-specific.
 
