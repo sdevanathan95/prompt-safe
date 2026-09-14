@@ -9,7 +9,7 @@ from __future__ import annotations
 from agentdojo.functions_runtime import FunctionCall
 from agentdojo.types import text_content_block_from_string
 
-from middleware.melon.compare import compare, shared_destination
+from middleware.melon.compare import compare
 from middleware.melon.types import ToolCall
 from middleware.screening.labels import BOTTOM, Integrity
 from middleware.screening.policy import is_external_content
@@ -128,17 +128,16 @@ def test_the_same_destination_through_a_different_tool_is_convergence():
 def test_a_destination_the_user_named_is_not_evidence():
     original = [ToolCall("send_email", {"recipients": ["bob@corp.com"], "body": "x"})]
     masked = [ToolCall("forward_email", {"to": "bob@corp.com"})]
-    assert shared_destination(original, masked, "Email the report to bob@corp.com") is None
+    verdict = compare(original, masked, task_description="Email the report to bob@corp.com")
+    assert verdict.verdict == "safe"
 
 
 def test_different_destinations_do_not_converge():
-    assert (
-        shared_destination(
-            [ToolCall("send_email", {"to": "alice@corp.com"})],
-            [ToolCall("send_email", {"to": "eve@evil.com"})],
-        )
-        is None
+    verdict = compare(
+        [ToolCall("send_email", {"to": "alice@corp.com"})],
+        [ToolCall("send_email", {"to": "eve@evil.com"})],
     )
+    assert verdict.verdict == "safe"
 
 
 # --- the masked run sees what the agent read, not what it wrote -----------

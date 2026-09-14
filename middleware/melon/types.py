@@ -34,6 +34,9 @@ class MelonVerdict:
     # content rather than obey instructions in it. The pair is what makes
     # the response comparison differential rather than absolute.
     describer_response: str = ""
+    # The original calls the masked run reproduced -- what a block rests on,
+    # so a later check can ask about exactly those. Empty unless blocked.
+    reproduced_calls: list[ToolCall] = field(default_factory=list)
 
     def to_trace_dict(self) -> dict:
         """Shape matching middleware/trace/schema.md's melon_check field."""
@@ -45,6 +48,9 @@ class MelonVerdict:
             ],
             "masked_calls": [
                 {"name": c.name, "arguments": c.arguments} for c in self.masked_calls
+            ],
+            "reproduced_calls": [
+                {"name": c.name, "arguments": c.arguments} for c in self.reproduced_calls
             ],
             "distance": self.distance,
             "verdict": self.verdict,

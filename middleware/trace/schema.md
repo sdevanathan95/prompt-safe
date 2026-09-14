@@ -31,9 +31,27 @@ Every step of the agent's execution produces one of these objects.
     "placeholder_task": "the neutral task used in the masked run, if ran",
     "original_calls": [],
     "masked_calls": [],
+    "reproduced_calls": [],
     "distance": null,
     "verdict": "safe | block | null"
   },
+  "response_check": {
+    "flagged": false,
+    "planted_instruction": "",
+    "reasoning": "",
+    "explanation": ""
+  },
+  "call_checks": [
+    {
+      "call": "get_webpage(url = www.example.com)",
+      "judged": true,
+      "grounded": false,
+      "flagged": false,
+      "planted_instruction": "",
+      "reasoning": "",
+      "explanation": ""
+    }
+  ],
   "final_action": "execute | block | ask_user",
   "explanation": "one or two sentences a human can read to understand why"
 }
@@ -65,5 +83,14 @@ Notes:
   null/empty in that case — that's expected, not a bug.
 - `explanation` is what the trace visualizer renders directly. Write it as
   if explaining the verdict to someone who hasn't read either paper.
+- `melon_check.reproduced_calls` are the original calls the masked run
+  reproduced — what a block rests on. Empty unless `verdict` is `block`.
+- `response_check` is the answer check (`screening/output_check.py`): whether
+  the final answer carried out an instruction planted in content the agent
+  read. `null` when the answer drew on no untrusted content.
+- `call_checks` asks the same question of the calls Stage 3 ruled on. When the
+  counterfactual test clears a call, a `flagged` check blocks it. When it
+  blocks a call whose content came only from the source the user delegated to,
+  a `judged` check with nothing `grounded` releases it. `null` when none ran.
 - Extend this schema by adding fields, not renaming existing ones — Track A
   and Track B will be reading/writing this in parallel from Week 1 onward.

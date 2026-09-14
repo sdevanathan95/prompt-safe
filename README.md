@@ -51,6 +51,19 @@ the stage before it couldn't resolve the decision:
    first decision is caught mid-lookup and scores as no-match. It runs
    against a throwaway copy of the environment and stops as soon as it
    stops calling tools, so benign content still costs a single turn.
+
+   The comparison is MELON's — embedding similarity over the rendered
+   calls — except where both calls name a destination. Then the destination
+   decides, because the embedding cannot tell a payment to `US122…` from one
+   to `US133…`. Calls to different destinations converge only if they carry
+   the same text word for word.
+
+   Stage 3 is followed by one more question, asked of the calls it ruled on:
+   did the call carry out an instruction planted for the assistant that names
+   what the call acts on? A call the masked run failed to repeat is still
+   blocked if it did. A call the masked run repeated only because the user
+   delegated to that content is released if the judge finds no such
+   instruction.
 4. **Human confirmation** — the rare last resort, only reached if the
    counterfactual test itself is inconclusive.
 5. **Trace logging** — every step records what was screened, what was
@@ -322,8 +335,10 @@ python -m pytest tests/ -v
 > successful attacks stopped (99.3%; 273 of 275 tool attacks and 11 of 11
 > text-only), 1 of 97 legitimate tasks blocked (1.0%), and zero human
 > confirmations against 742 under RTBAS's design. Every remaining failure and
-> its cause is in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §11. The table
-> below is an older, smaller two-suite run.
+> its cause is in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §11. The fixes
+> since, re-scored offline on 885 of the same recorded cases so far, stop 258
+> of 258 successful attacks and block 0 of 97 legitimate tasks (§12). The
+> table below is an older, smaller two-suite run.
 
 Measured on AgentDojo with the response channel off (`eval/report.py` output):
 
@@ -349,26 +364,28 @@ is weak in both directions.
 
 ### What to work on, highest value first
 
-1. **Make the call comparison destination-aware.** On the full run, 25
-   legitimate calls inside attacked episodes were blocked, 21 of them because
-   the embedding can't tell two calls of the same tool apart when only the
-   destination differs (an IBAN one digit away from the attacker's scores
-   0.939). Treat different destinations as different actions unless both runs
-   wrote the same content, and re-score that offline on the stored calls of
-   all 1,046 cases before adopting it (`FAILURE_ANALYSIS.md` §11).
+1. **Run the full benchmark again.** The fixes in `FAILURE_ANALYSIS.md` §12 —
+   destination-aware comparison, a second look after Stage 3, and handing
+   Stage 3 only the calls nothing earlier settled — were measured by
+   re-scoring the recorded run and by re-running the 28 failed cases live. A
+   fresh full run re-rolls the agent and is the real measurement.
 
-2. **Stop relying on one masked sample.** Both remaining misses are the masked
-   run making no tool call at all, so the counterfactual test read the
-   injected action as task-driven. Several masked samples per escalation is
-   one option, at a latency cost.
+2. **Misdirected hijacks.** An agent that follows an injection but sends to
+   the wrong place in its own words — measured: paying the user's dinner
+   friend instead of the attacker — shares no destination or text with the
+   masked run, and the planted instruction names nothing it sent. Nothing
+   here catches that without the fuzzy destination matching that blocked 20
+   legitimate payments.
 
 3. **Close the latency gap** — batch or overlap the model calls, use a smaller
    judge, cache verdicts for repeated content.
 
 4. **Attack this system deliberately.** Every attack tested so far comes from
-   a fixed script. Adaptive attacks aimed at the judge, the answer check or
-   the masked run are untested, and a paper that reports them is far stronger
-   than one that does not.
+   a fixed script. Adaptive attacks aimed at the judge, the answer and call
+   checks or the masked run are untested — the sharpest being an instruction
+   written to look like an ordinary item of the source the user delegated to,
+   where only the judge stands between it and a release. A paper that reports
+   them is far stronger than one that does not.
 
 5. **Add a second benchmark** (InjecAgent) so no result is AgentDojo-specific.
 

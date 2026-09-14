@@ -56,7 +56,26 @@ def run_melon_check(
     run_control_arm: bool = False,
     task_description: str = "",
 ) -> MelonVerdict:
-    """One step of the counterfactual test.
+    """One step of the counterfactual test: `run_masked`, then `verdict_for`."""
+    if not should_run_melon_check(original_calls):
+        return prefiltered_safe_verdict(original_calls)
+    masked, describer_text = run_masked(
+        tool_output_text, agent_call_fn, system_message, masking_prompts, run_control_arm
+    )
+    return verdict_for(
+        original_calls, masked, threshold, task_description, cache, describer_text
+    )
+
+
+def verdict_for(
+    original_calls: list[ToolCall],
+    masked: MaskedRun,
+    threshold: float = DEFAULT_THRESHOLD,
+    task_description: str = "",
+    cache: ToolCallCache | None = None,
+    describer_text: str = "",
+) -> MelonVerdict:
+    """Compare the calls under test against a finished masked run.
 
     `cache` is the paper's H. Pass the same cache across a session and the
     comparison runs against every call the masked run has made so far, which
@@ -64,9 +83,32 @@ def run_melon_check(
     then acts on the injected instruction. Omit it and the check is
     single-step, which is all a post-hoc benchmark can offer anyway.
     """
-    if not should_run_melon_check(original_calls):
-        return prefiltered_safe_verdict(original_calls)
+    masked_calls = list(masked.calls)
+    if cache is not None:
+        cache.add_all(masked_calls)
+        masked_calls = cache.calls
 
+    verdict = compare(original_calls, masked_calls, threshold, task_description)
+    verdict.placeholder_task = GENERAL_INSTRUCTIONS
+    verdict.masked_response = masked.text
+    verdict.describer_response = describer_text
+    return verdict
+
+
+def run_masked(
+    tool_output_text: str,
+    agent_call_fn: AgentCallFn,
+    system_message: str | None = None,
+    masking_prompts: tuple[str, ...] = ("summarize",),
+    run_control_arm: bool = False,
+) -> tuple[MaskedRun, str]:
+    """The masked re-executions alone: every ensemble member's calls pooled,
+    their text, and the control arm's text.
+
+    This is the expensive half of Stage 3, and it does not depend on which
+    calls are under test -- so a caller can start it early and compare any set
+    of calls against it afterwards with `verdict_for`.
+    """
     # One masked run per ensemble member. Their calls are pooled rather than
     # voted on, which makes the decision "any detector converged" -- the
     # aggregation that minimizes missed attacks. The paper's own averaging
@@ -117,15 +159,7 @@ def run_melon_check(
                 else:
                     absorb(run)
 
-    if cache is not None:
-        cache.add_all(masked_calls)
-        masked_calls = cache.calls
-
-    verdict = compare(original_calls, masked_calls, threshold, task_description)
-    verdict.placeholder_task = GENERAL_INSTRUCTIONS
-    verdict.masked_response = "\n\n".join(masked_texts)
-    verdict.describer_response = describer_text
-    return verdict
+    return MaskedRun(calls=masked_calls, text="\n\n".join(masked_texts)), describer_text
 
 
 def make_escalate_fn(

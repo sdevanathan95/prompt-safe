@@ -21,9 +21,15 @@ from dataclasses import dataclass, field
 
 from middleware.melon.types import MelonVerdict, ToolCall
 from middleware.screening import policy
-from middleware.screening.alignment import check_alignment
+from middleware.screening.alignment import check_alignment, designated_regions
 from middleware.screening.labels import Integrity, Label
-from middleware.screening.output_check import check_answer
+from middleware.screening.output_check import (
+    CallVerdict,
+    check_answer,
+    check_call,
+    taken_only_from,
+    what_the_call_carries,
+)
 from middleware.screening.provenance import (
     call_label,
     explain_call_label,
@@ -198,6 +204,13 @@ def check_calls(
     ]
     verdict = _worst_verdict(decisions)
     driving = _driving_decision(decisions, verdict)
+    # The calls Stage 3 will be asked about: those the policy escalated that
+    # nothing since has settled.
+    still_escalated = [
+        call
+        for call, decision in zip(proposed_calls, decisions)
+        if decision.verdict == "escalate"
+    ]
 
     # Stage 2.5: an escalation only means untrusted content reached a
     # sensitive action, which is also what a user pointing the agent at a
@@ -247,6 +260,23 @@ def check_calls(
         if results and all(r.clears_escalation for r in results):
             alignment = results[0]
             verdict = "safe"
+        else:
+            # A call the user's delegation covers is no evidence for the
+            # counterfactual test to weigh: a masked run repeats a delegated
+            # action by design. The live Session only ever hands Stage 3 the
+            # one escalated call; a post-hoc episode would otherwise hand it all.
+            still_escalated = [
+                call
+                for call, result in zip(calls_to_check, results)
+                if not result.clears_escalation
+            ]
+            # The trace explains a call Stage 3 is asked about, not one the
+            # delegation already cleared.
+            driving = next(
+                decision
+                for call, decision in zip(proposed_calls, decisions)
+                if any(call is remaining for remaining in still_escalated)
+            )
 
     timings = StageTimings(
         screen_ms=screened.screen_ms,
@@ -254,6 +284,7 @@ def check_calls(
     )
 
     melon_verdict: MelonVerdict | None = None
+    call_checks: list[CallVerdict] = []
     final_action: FinalAction
     explanation: str
 
@@ -286,9 +317,18 @@ def check_calls(
         )
     else:
         melon_started = time.perf_counter()
-        melon_verdict = escalate_fn(proposed_calls)
-        timings.melon_ms = (time.perf_counter() - melon_started) * 1000.0
+        melon_verdict = escalate_fn(still_escalated)
         final_action, explanation = _resolve_escalation(melon_verdict, driving)
+        if alignment_judge_fn is not None:
+            final_action, explanation, call_checks = _second_look(
+                screened,
+                still_escalated,
+                melon_verdict,
+                driving,
+                alignment_judge_fn,
+                (final_action, explanation),
+            )
+        timings.melon_ms = (time.perf_counter() - melon_started) * 1000.0
 
     # Response channel. An injection whose goal is met by what the agent says
     # calls no tool, so every check above clears it -- which is why this cannot
@@ -328,6 +368,7 @@ def check_calls(
         policy_verdict=verdict,
         melon_check=melon_verdict.to_trace_dict() if melon_verdict else None,
         response_check=response_verdict.to_trace_dict() if response_verdict else None,
+        call_checks=[c.to_trace_dict() for c in call_checks] or None,
         final_action=final_action,
         explanation=explanation,
     )
@@ -377,3 +418,85 @@ def _resolve_escalation(
         f"{driving.explanation} The counterfactual test was inconclusive, so "
         "this is the rare case that still needs a person to confirm."
     )
+
+
+def _second_look(
+    screened: ScreenedStep,
+    calls: list[ToolCall],
+    melon_verdict: MelonVerdict,
+    driving: policy.PolicyDecision,
+    judge_fn: JudgeFn,
+    resolved: tuple[FinalAction, str],
+) -> tuple[FinalAction, str, list[CallVerdict]]:
+    """The planted-instruction question, asked of the calls Stage 3 ruled on.
+
+    A masked run misleads in two ways, one per verdict:
+
+    - It clears a call it simply declined to repeat. Measured: an injected
+      "visit this link" was fetched by the real run while the masked run only
+      summarized. A call that carries out an instruction planted for the
+      assistant -- one naming what the call acts on -- is blocked anyway.
+    - It blocks a call it repeated only because the user delegated it. When
+      everything the call acts on came from the source the user pointed at,
+      the masked run repeats it by design -- MELON's documented false-positive
+      class -- so the block needs a planted instruction behind it too. If the
+      judge finds none naming what the call acts on, the delegation explains
+      the convergence and the call runs.
+
+    A judge that fails leaves the counterfactual test's answer as it was.
+    """
+    task = screened.task_description
+    if melon_verdict.verdict == "safe":
+        checks = _planted_instruction_checks(task, calls, screened.regions, judge_fn)
+        flagged = next((c for c in checks if c.flagged), None)
+        if flagged is not None:
+            return (
+                "block",
+                f"{driving.explanation} The counterfactual test did not reproduce "
+                "the action, but a second check found why it happened: "
+                f"{flagged.explanation}",
+                checks,
+            )
+        return (*resolved, checks)
+
+    reproduced = melon_verdict.reproduced_calls
+    if melon_verdict.verdict != "block" or not reproduced:
+        return (*resolved, [])
+    designated = designated_regions(task, screened.regions)
+    if not designated or not all(
+        taken_only_from(what_the_call_carries(c.arguments, task), designated)
+        for c in reproduced
+    ):
+        return (*resolved, [])
+    checks = _planted_instruction_checks(task, reproduced, screened.regions, judge_fn)
+    if len(checks) == len(reproduced) and all(c.judged and not c.grounded for c in checks):
+        return (
+            "execute",
+            f"{driving.explanation} The counterfactual test repeated the action, "
+            "but everything it acts on comes from the source the user pointed "
+            "the agent at, and no instruction planted there for the assistant "
+            "asks for it -- so the user's delegation, not an injection, is why "
+            f"both runs did it. {melon_verdict.explanation}",
+            checks,
+        )
+    return (*resolved, checks)
+
+
+def _planted_instruction_checks(
+    task_description: str,
+    calls: list[ToolCall],
+    regions: list[Region],
+    judge_fn: JudgeFn,
+) -> list[CallVerdict]:
+    """check_call for each call, concurrently -- independent questions that
+    would otherwise put a model round trip per call on the escalated path."""
+
+    def one(call: ToolCall) -> CallVerdict | None:
+        return check_call(task_description, call.name, call.arguments, regions, judge_fn)
+
+    if len(calls) <= 1:
+        found = [one(call) for call in calls]
+    else:
+        with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as pool:
+            found = list(pool.map(one, calls))
+    return [verdict for verdict in found if verdict is not None]

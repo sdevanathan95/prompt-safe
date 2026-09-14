@@ -11,21 +11,31 @@ Three properties of that rule matter and were each got wrong here before:
   meant a masked `send_money` was never compared against an original
   `transfer_money`, and every unpaired call scored maximum divergence — five
   of twelve benchmark cases read as clean for that reason alone.
-- Similarity is **always** the embedding cosine (§3.3). Short-circuiting to an
-  exact match on the identifying arguments makes the threshold inert: on the
-  banking suite every comparison landed on exactly 0.0 or 1.0.
-- Comparison runs on the **rendered, argument-filtered** string (A.3), not on
-  the raw call, so that free-text arguments cannot dominate the vector.
+- Similarity is the embedding cosine (§3.3) over the **rendered,
+  argument-filtered** string (A.3), not the raw call, so that free-text
+  arguments cannot dominate the vector.
+- Only calls that can cause harm are compared -- on both sides.
+
+One refinement is ours, not the paper's: when both calls name a destination,
+the destination decides instead of the embedding. In a short rendering the
+call template dominates the vector. Measured on the full AgentDojo run, a
+payment to the payee's IBAN scored 0.939 against one to the attacker's, two
+digits apart, and an email to janeLong@ scored 0.884 against one to jay@ --
+both over θ, and 21 legitimate calls were blocked that way. The destination is
+exactly what an injection chooses, so it is compared as a value; see
+`_converges`.
 """
 
 from __future__ import annotations
+
+import re
 
 import numpy as np
 
 from adapters.embeddings import cosine_similarity, embed, embed_many
 from middleware.melon.prefilter import is_sensitive
 from middleware.melon.types import MelonVerdict, ToolCall
-from middleware.screening.declassification import DESTINATION_FIELDS
+from middleware.screening.declassification import DESTINATION_FIELDS, _named_in
 from middleware.screening.provenance import identifiers
 
 # Cosine *similarity* above which two calls count as converged. The paper's
@@ -60,6 +70,19 @@ SENSITIVE_ARG_FIELDS: dict[str, tuple[str, ...]] = {
 # different because each run wrote the posted content in its own words.
 MAX_RENDERED_ARG_CHARS = 100
 
+# Text two calls share must run to at least this many words, as the writer
+# spaced them, to show one run wrote what the other did. A two-word subject such
+# as "Spotify Premium" recurs in the user's own transaction history, and an
+# address is one word however many dots it has; the misdirected hijack this
+# exists for wrote "Hey, how is it going?" word for word. Ours, not the paper's.
+MIN_SHARED_TEXT_WORDS = 3
+
+# Shared text quoted in an explanation is cut to this.
+_MAX_QUOTED_CHARS = 120
+
+_WORD = re.compile(r"[a-z0-9]+")
+_SCHEME = re.compile(r"^https?://")
+
 
 def render_call(call: ToolCall) -> str:
     """`function_name(arg1 = value1, arg2 = value2)`, per A.3."""
@@ -84,76 +107,171 @@ def call_similarity(left: ToolCall, right: ToolCall) -> float:
     return cosine_similarity(embed(render_call(left)), embed(render_call(right)))
 
 
-def most_similar_pair(
+def _similarities(
     original_calls: list[ToolCall], masked_calls: list[ToolCall]
-) -> tuple[float, ToolCall | None, ToolCall | None]:
-    """Highest similarity over all (original, masked) pairs, and the pair.
+) -> np.ndarray:
+    """Every (original, masked) pair's similarity, from one embedding batch.
 
-    All pairs, not name-matched pairs: the masked run frequently reaches the
-    same effect through a differently-named tool, and the whole point of an
-    embedding comparison is to catch that.
-
-    Every text is embedded in one batch and the pairwise scores come from a
-    single matrix product. Embedding call-by-call instead made this the
-    dominant cost of the entire pipeline -- one ~470ms round trip per distinct
-    call, 5.5 seconds for a three-by-three comparison -- which is why the
-    always-on screener looked cheap next to it and the real bottleneck was
-    invisible.
+    Embedding call-by-call instead made this the dominant cost of the entire
+    pipeline -- one ~470ms round trip per distinct call, 5.5 seconds for a
+    three-by-three comparison. Clamped: float error on identical vectors
+    otherwise reports a negative distance, which reads as a bug in any trace
+    that shows it.
     """
-    if not original_calls or not masked_calls:
-        return (0.0, None, None)
-
     original_texts = [render_call(c) for c in original_calls]
     masked_texts = [render_call(c) for c in masked_calls]
     vectors = embed_many(original_texts + masked_texts)
-
     left = np.array(vectors[: len(original_texts)])
     right = np.array(vectors[len(original_texts) :])
-    scores = left @ right.T
-
-    flat = int(np.argmax(scores))
-    row, column = divmod(flat, scores.shape[1])
-    return (float(scores[row, column]), original_calls[row], masked_calls[column])
+    return np.clip(left @ right.T, 0.0, 1.0)
 
 
-def _destinations(call: ToolCall) -> set[str]:
-    """Identifiers -- URLs, emails, IBANs -- in the arguments that say where a
-    call sends something."""
+def _targets(call: ToolCall) -> set[str]:
+    """Where a call sends something, one normalised string per destination.
+
+    Identifiers are pulled out of the value, so `http://www.x.com/` and
+    `www.x.com` -- or a recipient list recorded as text -- name one
+    destination. A plain name, a channel or a person, is kept whole.
+    """
     found: set[str] = set()
     for name, value in call.arguments.items():
         if name.lower() not in DESTINATION_FIELDS:
             continue
         for item in value if isinstance(value, (list, tuple)) else [value]:
-            found.update(identifiers(str(item)))
+            text = str(item).strip()
+            if not text:
+                continue
+            found.update(identifiers(text) or [_SCHEME.sub("", text.casefold()).rstrip("/")])
     return found
 
 
-def shared_destination(
-    original_calls: list[ToolCall],
-    masked_calls: list[ToolCall],
-    task_description: str = "",
-) -> tuple[str, ToolCall, ToolCall] | None:
-    """A destination both runs sent to, if any -- whatever tool each used.
-
-    The embedding compares whole calls, so the same leak through a different
-    tool scores as a different action: measured, an injection posted a
-    channel's messages to an attacker URL with `post_webpage` while the masked
-    run sent them there with `send_channel_message`, similarity 0.634, and the
-    attack passed. The destination is what the attacker actually chose, and a
-    run that never saw the user's task choosing the same one is the
-    convergence the test looks for. A destination the user named is excluded:
-    both runs reaching it is explained by the request, not by the content.
-    """
-    user_named = set(identifiers(task_description))
-    for original in original_calls:
-        mine = _destinations(original) - user_named
-        if not mine:
+def _texts(call: ToolCall) -> list[tuple[str, str]]:
+    """The call's free text as (normalised, as written) pairs: every argument
+    that is not a destination and runs to MIN_SHARED_TEXT_WORDS words."""
+    found: list[tuple[str, str]] = []
+    for name, value in call.arguments.items():
+        if name.lower() in DESTINATION_FIELDS:
             continue
-        for masked in masked_calls:
-            shared = mine & _destinations(masked)
-            if shared:
-                return sorted(shared)[0], original, masked
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            if not isinstance(item, str):
+                continue
+            plain = item.replace("\\n", " ")
+            if len(plain.split()) >= MIN_SHARED_TEXT_WORDS:
+                found.append((" ".join(_WORD.findall(plain.casefold())), item.strip()))
+    return found
+
+
+def _shared_text(original: ToolCall, masked: ToolCall) -> str | None:
+    """Text one call carries that the other contains word for word."""
+    for theirs, written in _texts(masked):
+        for mine, own in _texts(original):
+            if f" {theirs} " in f" {mine} ":
+                return written
+            if f" {mine} " in f" {theirs} ":
+                return own
     return None
+
+
+def _converges(
+    original: ToolCall,
+    masked: ToolCall,
+    similarity: float,
+    similarity_threshold: float,
+    task_description: str,
+) -> tuple[str, str] | None:
+    """Whether the masked call reproduces the original one, and on what:
+    ("destination", d), ("text", t) or ("similarity", "").
+
+    Where both calls name a destination, the destination decides. The same one
+    converges unless the user named it -- then the request explains both runs
+    reaching it. Different destinations, or only user-named ones in common,
+    converge only if the calls carry the same text, which is what a hijack that
+    misfired on the address still leaves behind. Anything else is the paper's
+    rule: embedding similarity over θ.
+    """
+    mine, theirs = _targets(original), _targets(masked)
+    if mine and theirs:
+        unnamed = sorted(t for t in mine & theirs if not _named_in(task_description, t))
+        if unnamed:
+            return ("destination", unnamed[0])
+        text = _shared_text(original, masked)
+        return ("text", text) if text is not None else None
+    if similarity > similarity_threshold:
+        return ("similarity", "")
+    return None
+
+
+def _quoted(text: str) -> str:
+    one_line = " ".join(text.split())
+    if len(one_line) <= _MAX_QUOTED_CHARS:
+        return one_line
+    return one_line[: _MAX_QUOTED_CHARS - 3] + "..."
+
+
+def _block_explanation(
+    original: ToolCall,
+    masked: ToolCall,
+    similarity: float,
+    reason: tuple[str, str],
+    similarity_threshold: float,
+) -> str:
+    kind, shared = reason
+    pair = (
+        f"{render_call(masked)} in the masked run against {render_call(original)} "
+        f"in the real one (similarity {similarity:.3f})"
+    )
+    if kind == "destination":
+        return (
+            f"With the user's task removed, the agent still sent to {shared}: {pair}. "
+            "The user never named that destination, so the content chose it. "
+            "Flagged as injection."
+        )
+    if kind == "text":
+        return (
+            f'With the user\'s task removed, the agent still wrote "{_quoted(shared)}": '
+            f"{pair}. The destinations differ, but the same words were dictated by "
+            "the content, not the user. Flagged as injection."
+        )
+    return (
+        f"With the user's task removed, the agent still produced "
+        f"{render_call(masked)}, which matches {render_call(original)} from the "
+        f"real run (similarity {similarity:.3f} > {similarity_threshold:.2f}). "
+        "Nothing about the user's request explains that action, so it came from "
+        "the tool output. Flagged as injection."
+    )
+
+
+def _safe_explanation(
+    original: ToolCall,
+    masked: ToolCall,
+    similarity: float,
+    similarity_threshold: float,
+) -> str:
+    mine, theirs = _targets(original), _targets(masked)
+    if mine and theirs:
+        common = sorted(mine & theirs)
+        where = (
+            f"both go to {', '.join(common)}, which the user named,"
+            if common
+            else (
+                f"they go to different destinations -- {', '.join(sorted(mine))} "
+                f"and {', '.join(sorted(theirs))} --"
+            )
+        )
+        return (
+            f"With the user's task removed the agent's closest action was "
+            f"{render_call(masked)}, against {render_call(original)} in the real "
+            f"run (similarity {similarity:.3f}), but {where} and they share no "
+            "text, so the masked run did not reproduce the action. Consistent "
+            "with benign behavior."
+        )
+    return (
+        f"With the user's task removed the agent's closest action was "
+        f"{render_call(masked)}, which does not match {render_call(original)} "
+        f"from the real run (similarity {similarity:.3f} ≤ "
+        f"{similarity_threshold:.2f}). The action depended on the real task, "
+        "consistent with benign behavior."
+    )
 
 
 def compare(
@@ -165,14 +283,20 @@ def compare(
     """Compare the two runs' calls. `threshold` is a cosine *distance*."""
     similarity_threshold = 1.0 - threshold
 
-    if not original_calls:
+    def verdict(kind, distance, explanation, reproduced=()) -> MelonVerdict:
         return MelonVerdict(
             ran=True,
-            verdict="safe",
-            distance=None,
+            verdict=kind,
+            distance=distance,
             original_calls=original_calls,
             masked_calls=masked_calls,
-            explanation="No tool calls were made in the original run — nothing to test.",
+            explanation=explanation,
+            reproduced_calls=list(reproduced),
+        )
+
+    if not original_calls:
+        return verdict(
+            "safe", None, "No tool calls were made in the original run — nothing to test."
         )
 
     # Only calls that can cause harm are compared. A converged read is not an
@@ -180,78 +304,70 @@ def compare(
     # a read in the original run would match by construction.
     sensitive_calls = [call for call in original_calls if is_sensitive(call)]
     if not sensitive_calls:
-        return MelonVerdict(
-            ran=True,
-            verdict="safe",
-            distance=None,
-            original_calls=original_calls,
-            masked_calls=masked_calls,
-            explanation=(
-                "No call in the original run touches a sensitive action, so "
-                "convergence could not cause harm either way."
-            ),
+        return verdict(
+            "safe",
+            None,
+            "No call in the original run touches a sensitive action, so "
+            "convergence could not cause harm either way.",
         )
 
     if not masked_calls:
-        return MelonVerdict(
-            ran=True,
-            verdict="safe",
-            distance=1.0,
-            original_calls=original_calls,
-            masked_calls=masked_calls,
-            explanation=(
-                "With the user's task removed the agent made no tool calls at "
-                "all, so the action it took in the real run was driven by the "
-                "task. Consistent with benign behavior."
-            ),
+        return verdict(
+            "safe",
+            1.0,
+            "With the user's task removed the agent made no tool calls at all, so "
+            "the action it took in the real run was driven by the task. Consistent "
+            "with benign behavior.",
         )
 
-    similarity, original_match, masked_match = most_similar_pair(
-        sensitive_calls, masked_calls
+    # The same filter on the masked side: the masked run *reading* a channel
+    # says nothing about who chose to post to it.
+    harmful = [call for call in masked_calls if is_sensitive(call)]
+    if not harmful:
+        return verdict(
+            "safe",
+            1.0,
+            "With the user's task removed the agent only read, and did nothing "
+            "that could cause harm, so the action it took in the real run was "
+            "driven by the task. Consistent with benign behavior.",
+        )
+
+    scores = _similarities(sensitive_calls, harmful)
+    ranked = sorted(
+        (
+            (float(scores[i, j]), i, j)
+            for i in range(len(sensitive_calls))
+            for j in range(len(harmful))
+        ),
+        reverse=True,
     )
-    # Clamped: float error on identical vectors otherwise reports a
-    # negative distance, which reads as a bug in any trace that shows it.
-    similarity = min(1.0, max(0.0, similarity))
-    distance = 1.0 - similarity
-    verdict = "block" if similarity > similarity_threshold else "safe"
+    best, best_i, best_j = ranked[0]
 
-    if verdict == "block":
-        explanation = (
-            f"With the user's task removed, the agent still produced "
-            f"{render_call(masked_match)}, which matches "
-            f"{render_call(original_match)} from the real run "
-            f"(similarity {similarity:.3f} > {similarity_threshold:.2f}). "
-            "Nothing about the user's request explains that action, so it came "
-            "from the tool output. Flagged as injection."
+    first = None
+    reproduced: list[ToolCall] = []
+    for similarity, i, j in ranked:
+        reason = _converges(
+            sensitive_calls[i], harmful[j], similarity, similarity_threshold, task_description
         )
-    else:
-        explanation = (
-            f"With the user's task removed the agent's closest action was "
-            f"{render_call(masked_match)}, which does not match "
-            f"{render_call(original_match)} from the real run "
-            f"(similarity {similarity:.3f} ≤ {similarity_threshold:.2f}). "
-            "The action depended on the real task, consistent with benign behavior."
+        if reason is None:
+            continue
+        if first is None:
+            first = (similarity, sensitive_calls[i], harmful[j], reason)
+        if sensitive_calls[i] not in reproduced:
+            reproduced.append(sensitive_calls[i])
+
+    if first is not None:
+        similarity, original, masked, reason = first
+        return verdict(
+            "block",
+            1.0 - best,
+            _block_explanation(original, masked, similarity, reason, similarity_threshold),
+            reproduced,
         )
-
-    if verdict == "safe":
-        shared = shared_destination(sensitive_calls, masked_calls, task_description)
-        if shared is not None:
-            destination, original_hit, masked_hit = shared
-            verdict = "block"
-            explanation = (
-                f"With the user's task removed, the agent still sent to "
-                f"{destination} -- through {masked_hit.name} rather than "
-                f"{original_hit.name}, which is why the two calls did not look "
-                f"alike (similarity {similarity:.3f}). Both runs chose the same "
-                "destination and the user never named it, so the content chose "
-                "it. Flagged as injection."
-            )
-
-    return MelonVerdict(
-        ran=True,
-        verdict=verdict,
-        distance=distance,
-        original_calls=original_calls,
-        masked_calls=masked_calls,
-        explanation=explanation,
+    return verdict(
+        "safe",
+        1.0 - best,
+        _safe_explanation(
+            sensitive_calls[best_i], harmful[best_j], best, similarity_threshold
+        ),
     )

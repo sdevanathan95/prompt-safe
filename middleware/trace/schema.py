@@ -40,6 +40,10 @@ class StepTrace:
     # Response-channel comparison, for steps where the counterfactual test
     # ran. None when it did not.
     response_check: dict | None = None
+    # For calls the counterfactual test ruled on: whether each carried out an
+    # instruction planted in content the agent read (output_check.check_call).
+    # None when no such check ran.
+    call_checks: list[dict] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -51,6 +55,7 @@ class StepTrace:
             "policy_verdict": self.policy_verdict,
             "melon_check": self.melon_check,
             "response_check": self.response_check,
+            "call_checks": self.call_checks,
             "final_action": self.final_action,
             "explanation": self.explanation,
         }

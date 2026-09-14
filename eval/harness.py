@@ -20,14 +20,13 @@ Two conditions per user task:
 
 For each condition: the original task runs normally through the full
 AgentDojo pipeline. Its actual tool-output text (whatever it observed,
-injected content included) and already-decided tool calls are then handed
-to `middleware.melon.engine.run_melon_check` — the same Track-A-facing
-entrypoint the eventual live decorator will call, not a harness-local
-reimplementation of it. The `agent_call_fn` we give it adapts
-`run_melon_check`'s generic masked-conversation dicts (see
-middleware/melon/masking.py) into a single direct call to the pipeline's
-own `llm` element — not the full pipeline, since it only needs one
-decision, not a multi-step loop.
+injected content included) and already-decided tool calls then go through
+the same `guard.check_calls` the live decorator uses, with Stage 3 built from
+`middleware.melon.engine`'s own pieces rather than a harness-local
+reimplementation: `run_masked` for the masked re-execution, `verdict_for` for
+the comparison against it. The `agent_call_fn` we give `run_masked` adapts
+its generic masked-conversation dicts (see middleware/melon/masking.py) into
+a short run of the pipeline's own `llm` element.
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ import json
 import sys
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentdojo.agent_pipeline import AgentPipeline, PipelineConfig
@@ -74,7 +73,8 @@ from adapters.rate_limit import (
 from adapters.rate_limit import configure as configure_rate_limits
 from adapters.retry import with_retry
 from middleware.melon.compare import DEFAULT_THRESHOLD
-from middleware.melon.engine import AgentCallFn, run_melon_check
+from middleware.melon.engine import AgentCallFn, run_masked, verdict_for
+from middleware.melon.prefilter import prefiltered_safe_verdict, should_run_melon_check
 from middleware.melon.types import MaskedRun, MelonVerdict, ToolCall
 from middleware.screening.alignment import check_alignment
 from middleware.screening.guard import StepResult, check_calls, screen_step
@@ -122,6 +122,11 @@ class CaseResult:
     # The agent's final answer. Kept so the response channel's verdict on a
     # case can be read, and re-checked offline, without re-running the agent.
     final_response: str | None = None
+    # Every call the agent made in the episode. Stage 3's verdict holds only the
+    # calls it was asked about, and a case Stage 2 cleared -- the kind of miss
+    # that matters most -- would otherwise leave no record of what the agent
+    # did. Replaying a case offline needs them all.
+    calls: list[ToolCall] = field(default_factory=list)
 
     def to_record(self) -> dict:
         """One JSON-safe line of a resumable results file."""
@@ -138,15 +143,12 @@ class CaseResult:
                 "verdict": verdict.verdict,
                 "distance": verdict.distance,
                 "explanation": verdict.explanation,
-                # Saved for every case, not only escalated ones: the trace
-                # holds the calls only when Stage 3 ran, so a case Stage 2
-                # cleared -- the kind of miss that matters most -- would
-                # otherwise leave no record of what the agent actually did.
                 "original_calls": [
                     {"name": c.name, "arguments": c.arguments}
                     for c in verdict.original_calls
                 ],
             },
+            "calls": [{"name": c.name, "arguments": c.arguments} for c in self.calls],
             "trace": self.trace,
             "timings": self.timings,
             "final_response": self.final_response,
@@ -176,6 +178,12 @@ class CaseResult:
             trace=record["trace"],
             timings=record["timings"],
             final_response=record.get("final_response"),
+            # Records written before `calls` existed kept the whole episode in
+            # the MELON verdict instead.
+            calls=[
+                ToolCall(c["name"], c["arguments"])
+                for c in record.get("calls", melon.get("original_calls", []))
+            ],
         )
 
 
@@ -515,18 +523,15 @@ def _guarded_verdict(
     # channel no longer needs a masked run of its own; see output_check.py.
     prompts = masking_prompts
 
-    def run_masked() -> MelonVerdict:
+    def masked_run() -> tuple[MaskedRun, str]:
         masked_element = melon_llm_element or llm_element
         agent_call_fn = _make_agent_call_fn(
             masked_element, suite, environment.model_copy(deep=True)
         )
-        return run_melon_check(
-            original_calls,
-            tool_output_text=tool_output_text,
-            agent_call_fn=agent_call_fn,
+        return run_masked(
+            tool_output_text,
+            agent_call_fn,
             system_message=system_message,
-            threshold=threshold,
-            task_description=user_task.PROMPT,
             masking_prompts=prompts,
         )
 
@@ -548,9 +553,25 @@ def _guarded_verdict(
 
     with ThreadPoolExecutor(max_workers=2 + len(original_calls)) as pool:
         if lazy_masked_run:
-            masked = functools.cache(run_masked)
+            masked = functools.cache(masked_run)
         else:
-            masked = pool.submit(run_masked).result
+            masked = pool.submit(masked_run).result
+
+        def escalate(calls: list[ToolCall]) -> MelonVerdict:
+            # Stage 3 answers for the calls it is handed -- the ones no earlier
+            # stage settled -- against one masked run that does not depend on
+            # which those are.
+            if not should_run_melon_check(calls):
+                return prefiltered_safe_verdict(calls)
+            run, describer_text = masked()
+            return verdict_for(
+                calls,
+                run,
+                threshold,
+                task_description=user_task.PROMPT,
+                describer_text=describer_text,
+            )
+
         alignments = [pool.submit(align, call) for call in original_calls]
         screened = screen_step(
             tool_outputs,
@@ -562,7 +583,7 @@ def _guarded_verdict(
             step,
             screened,
             original_calls,
-            escalate_fn=lambda calls: masked(),
+            escalate_fn=escalate,
             alignment_judge_fn=alignment_fn,
             alignment_results=[f.result() for f in alignments],
             original_response=original_response,

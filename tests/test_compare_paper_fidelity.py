@@ -10,7 +10,6 @@ from __future__ import annotations
 from middleware.melon.compare import (
     NO_TOOL_CALLS,
     compare,
-    most_similar_pair,
     render_call,
     render_calls,
 )
@@ -53,16 +52,16 @@ def test_comparison_is_all_pairs_not_name_matched():
     masked call could never be compared against a differently-named original,
     which scored those cases as maximally divergent — clean-looking, and wrong.
     """
-    original = [ToolCall("send_money", {"recipient": "attacker", "amount": 100})]
+    original = [ToolCall("transfer_money", {"recipient": "attacker", "amount": 100})]
     masked = [
         ToolCall("get_iban", {}),
         ToolCall("send_money", {"recipient": "attacker", "amount": 100}),
     ]
-    similarity, original_match, masked_match = most_similar_pair(original, masked)
+    verdict = compare(original, masked)
 
-    assert similarity > 0.99  # identical rendering
-    assert masked_match.name == "send_money"
-    assert original_match is original[0]
+    assert verdict.verdict == "block"
+    assert "send_money(recipient = attacker, amount = 100)" in verdict.explanation
+    assert verdict.reproduced_calls == original
 
 
 def test_identical_sensitive_calls_converge_and_block():
