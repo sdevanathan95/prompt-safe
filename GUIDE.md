@@ -1004,10 +1004,9 @@ with attacks the base model ignored anyway.
 ### 8.2 Where it stands
 
 > **Full AgentDojo run, all 1,046 cases** ([FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md)
-> §11): 284 of 286 successful attacks stopped (99.3%), 1 of 97 legitimate
-> tasks blocked (1.0%), and 0 human confirmations against 742 under RTBAS's
-> design. The rest of this section is the earlier two-suite run, kept for
-> comparison.
+> §13): 278 of 278 successful attacks stopped, 0 of 97 legitimate tasks
+> blocked, and 0 human confirmations against 719 under RTBAS's design. The
+> rest of this section is the earlier two-suite run, kept for comparison.
 
 ```
 banking   n=80    37/37 prevention (100%)     0/8   false positives

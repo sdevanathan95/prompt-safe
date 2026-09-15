@@ -331,14 +331,13 @@ python -m pytest tests/ -v
 
 ## Where this stands, and what would move it forward
 
-> **Latest measurement — the full AgentDojo run, all 1,046 cases:** 284 of 286
-> successful attacks stopped (99.3%; 273 of 275 tool attacks and 11 of 11
-> text-only), 1 of 97 legitimate tasks blocked (1.0%), and zero human
-> confirmations against 742 under RTBAS's design. Every remaining failure and
-> its cause is in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §11. The fixes
-> since, re-scored offline on 885 of the same recorded cases so far, stop 258
-> of 258 successful attacks and block 0 of 97 legitimate tasks (§12). The
-> table below is an older, smaller two-suite run.
+> **Latest measurement — the full AgentDojo run, all 1,046 cases:** 278 of 278
+> successful attacks stopped (100%, above ~98.6% at 95% confidence; 268 tool
+> attacks and 10 text-only), 0 of 97 legitimate tasks blocked (true rate very
+> likely below 3.8%), and zero human confirmations against 719 under RTBAS's
+> design. What changed since the previous run, and what still goes wrong, is
+> in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) §12–§13. The table below is an
+> older, smaller two-suite run.
 
 Measured on AgentDojo with the response channel off (`eval/report.py` output):
 
@@ -353,22 +352,21 @@ Zero false positives across 16 benign runs, and zero human confirmations
 against the 64 that RTBAS's own design would have raised.
 
 Against Straiker's published figures (98.4% accuracy, 1.2% false positives,
-<300ms): **this still cannot claim to be better.** On the full run, 284 of 286
-attacks stopped is statistically consistent with anything above roughly 97.5%
-— it does not demonstrate better than their 99.6%. One false positive in 97
-(1.0%) is in line with their 1.2%, but its upper bound is 5.6%. And at about
-10 s per step on the full run (lazy mode, with 71% of cases escalating to a
-masked run) it is far slower. Their numbers are self-reported on an
-undisclosed test set and these are on a public benchmark, so the comparison
-is weak in both directions.
+<300ms): **this still cannot claim to be better.** On the latest full run, 278
+of 278 attacks stopped is statistically consistent with anything above roughly
+98.6% — it does not demonstrate better than their 99.6%. No false positive in
+97 is in line with their 1.2%, but the upper bound is 3.8%. And at about 17 s
+per step (lazy mode, with 69% of cases escalating to a masked run) it is far
+slower. Their numbers are self-reported on an undisclosed test set and these
+are on a public benchmark, so the comparison is weak in both directions.
 
 ### What to work on, highest value first
 
-1. **Run the full benchmark again.** The fixes in `FAILURE_ANALYSIS.md` §12 —
-   destination-aware comparison, a second look after Stage 3, and handing
-   Stage 3 only the calls nothing earlier settled — were measured by
-   re-scoring the recorded run and by re-running the 28 failed cases live. A
-   fresh full run re-rolls the agent and is the real measurement.
+1. **The last two over-blocks** (`FAILURE_ANALYSIS.md` §13). A plain channel
+   name both runs post to is weak evidence — require shared text when that is
+   all two calls share — and a user pointing at "the message where someone
+   wrote about a restaurant" should designate that message the way a quoted
+   name does.
 
 2. **Misdirected hijacks.** An agent that follows an injection but sends to
    the wrong place in its own words — measured: paying the user's dinner
@@ -378,7 +376,9 @@ is weak in both directions.
    legitimate payments.
 
 3. **Close the latency gap** — batch or overlap the model calls, use a smaller
-   judge, cache verdicts for repeated content.
+   judge, cache verdicts for repeated content, and run the second look
+   alongside the masked run instead of after it. The latest full run averaged
+   17 s per step.
 
 4. **Attack this system deliberately.** Every attack tested so far comes from
    a fixed script. Adaptive attacks aimed at the judge, the answer and call

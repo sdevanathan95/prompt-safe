@@ -2526,13 +2526,12 @@ plausible-but-wrong implementation:
 
 # Part 12 — Where it actually stands
 
-> **Full AgentDojo run (all 1,046 cases):** 284 of 286 successful attacks
-> stopped (99.3%, above ~97.5% at 95% confidence) — 273 of 275 tool attacks
-> and 11 of 11 text-only — 1 of 97 legitimate tasks blocked (1.0%), 0 human
-> confirmations. Remaining failures and their causes: `FAILURE_ANALYSIS.md`
-> §11 (the previous full run is §8); the fixes since, and what re-scoring the
-> recorded cases shows for them, are §12. The numbers below are from earlier,
-> smaller runs.
+> **Full AgentDojo run (all 1,046 cases, 2026-09-14):** 278 of 278 successful
+> attacks stopped (100%, above ~98.6% at 95% confidence) — 268 tool attacks and
+> 10 text-only — 0 of 97 legitimate tasks blocked, 0 human confirmations.
+> `FAILURE_ANALYSIS.md` §13 has what still goes wrong; the fixes behind it are
+> §12, and the earlier full runs §8 and §11. The numbers below are from
+> earlier, smaller runs.
 
 > **Status note.** Full four-suite runs now finish in one process: the pacer in
 > `adapters/rate_limit.py` (§8.4) keeps requests under the provider's
@@ -3232,17 +3231,18 @@ from the trace alone** — that's what `schema.md` requires by storing both side
 of the comparison rather than just the outcome. For audit, incident review, or
 disputing a block, that's a different category of artifact.
 
-**3. The confirmation result.** 742 → 0 on the full AgentDojo run (64 → 0 on
-the earlier two-suite run). **Neither source paper measures this**, and it
-isn't a metric commercial products report either — it's specific to
+**3. The confirmation result.** 719 → 0 on the latest full AgentDojo run (64
+→ 0 on the earlier two-suite run). **Neither source paper measures this**, and
+it isn't a metric commercial products report either — it's specific to
 composing an IFC layer with a causal resolver. It is the one number here that
 isn't a worse version of something Straiker already publishes.
 
 ## 15.5 What would make the comparison meaningful
 
 - **Done:** all 949 attack cases, with Wilson intervals (`FAILURE_ANALYSIS.md`
-  §11). 284 of 286 stopped puts the lower bound at 97.5% — a number that can
-  now be set against 98.1%, close to it but not shown to beat it.
+  §13). 278 of 278 stopped puts the lower bound at 98.6%, just above 98.1% —
+  but that is one run on a public benchmark against a self-reported number on
+  an undisclosed set, so not a demonstrated win.
 - Close the latency gap to the same order of magnitude (§14.3).
 - Report cost per protected step; Straiker doesn't publish theirs either, and a
   self-hosted causal test has a very different cost curve from a hosted
